@@ -78,6 +78,29 @@
 
 (comment
 
+  (deep=
+    #
+    (peg/match
+      xmlish-peg
+      ``
+      <html>
+      <body>
+      <a href="https://janet-lang.org/">Janet Home Page</a>
+      </body>
+      </html>
+      ``)
+    #
+    @[{:content @["\n"
+                  {:content @["\n"
+                              {:attrs @{"href" "https://janet-lang.org/"}
+                               :content @["Janet Home Page"]
+                               :tag "a"}
+                              "\n"]
+                   :tag "body"}
+                  "\n"]
+       :tag "html"}])
+  # > true
+
   (peg/match
     xmlish-peg
     ``

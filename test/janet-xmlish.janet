@@ -2112,9 +2112,13 @@
   )
 
 (def z/down down)
+(def z/insert-right insert-right)
 (def z/left left)
 (def z/node node)
 (def z/right right)
+(def z/rightmost rightmost)
+(def z/unwrap unwrap)
+(def z/zip zip)
 (def z/zipper zipper)
 
 (defn has-children?
@@ -2145,10 +2149,12 @@
      [:symbol @{} "+"] [:whitespace @{} " "]
      [:number @{} "1"] [:whitespace @{} " "]
      [:number @{} "2"]])
-  # => true
+  # =>
+  true
 
   (has-children? [:number @{} "8"])
-  # => false
+  # =>
+  false
 
   )
 
@@ -2187,12 +2193,41 @@
   (def [the-node the-state]
     (zip root-node))
 
-  (deep= the-node root-node)
-  # => true
+  the-node
+  # =>
+  root-node
 
-  (deep= (merge {} the-state)
-         @{})
-  # => true
+  (merge {} the-state)
+  # =>
+  @{}
+
+  )
+
+(defn attrs
+  ``
+  Return the attributes table for the node of a z-location.  The
+  attributes table contains at least bounds of the node by 1-based line
+  and column numbers.
+  ``
+  [zloc]
+  (get (z/node zloc) 1))
+
+(comment
+
+  (type (import ./location :as l))
+  # =>
+  :table
+
+  )
+
+(comment
+
+  (-> (l/ast "(+ 1 3)")
+      zip
+      z/down
+      attrs)
+  # =>
+  @{:bc 1 :bl 1 :ec 8 :el 1}
 
   )
 
@@ -2207,33 +2242,24 @@
 
 (comment
 
-  (type (import ./location :as l))
+  #(import ./location :as l)
+
+  (-> (l/ast "(+ 1 3)")
+      zip-down
+      z/node)
   # =>
-  :table
-
-  )
-
-(comment
-
-  (deep=
-    #
-    (-> (l/ast "(+ 1 3)")
-        zip-down
-        z/node)
-    #
-    '(:tuple @{:bc 1 :bl 1
-               :ec 8 :el 1}
-             (:symbol @{:bc 2 :bl 1
-                        :ec 3 :el 1} "+")
-             (:whitespace @{:bc 3 :bl 1
-                            :ec 4 :el 1} " ")
-             (:number @{:bc 4 :bl 1
-                        :ec 5 :el 1} "1")
-             (:whitespace @{:bc 5 :bl 1
-                            :ec 6 :el 1} " ")
-             (:number @{:bc 6 :bl 1
-                        :ec 7 :el 1} "3")))
-  # => true
+  '(:tuple @{:bc 1 :bl 1
+             :ec 8 :el 1}
+           (:symbol @{:bc 2 :bl 1
+                      :ec 3 :el 1} "+")
+           (:whitespace @{:bc 3 :bl 1
+                          :ec 4 :el 1} " ")
+           (:number @{:bc 4 :bl 1
+                      :ec 5 :el 1} "1")
+           (:whitespace @{:bc 5 :bl 1
+                          :ec 6 :el 1} " ")
+           (:number @{:bc 6 :bl 1
+                      :ec 7 :el 1} "3"))
 
   )
 
@@ -2269,7 +2295,24 @@
                       #
                       true))
       z/node)
-  # => [:symbol @{} "+"]
+  # =>
+  [:symbol @{} "+"]
+
+  (-> [:code @{}
+       [:tuple @{}
+        [:keyword @{} ":a"]]]
+      zip-down
+      z/down
+      (right-until |(match (z/node $)
+                      [:comment]
+                      false
+                      #
+                      [:whitespace]
+                      false
+                      #
+                      true)))
+  # =>
+  nil
 
   )
 
@@ -2277,7 +2320,11 @@
 (defn right-skip-wsc
   ``
   Try to move right from `zloc`, skipping over whitespace
-  and comment nodes. XXX
+  and comment nodes.
+
+  When at least one right move succeeds, return the z-location
+  for the last successful right move destination.  Otherwise,
+  return nil.
   ``
   [zloc]
   (right-until zloc
@@ -2303,11 +2350,25 @@
       z/down
       right-skip-wsc
       z/node)
-  # => [:symbol @{:bc 1 :bl 2 :ec 2 :el 2} "+"]
+  # =>
+  [:symbol @{:bc 1 :bl 2 :ec 2 :el 2} "+"]
+
+  (-> (l/ast "(:a)")
+      zip-down
+      z/down
+      right-skip-wsc)
+  # =>
+  nil
 
   )
 
 (defn left-until
+  ``
+  Try to move left from `zloc`, calling `pred` for each
+  left sibling.  If the `pred` call has a truthy result,
+  return the corresponding left sibling.
+  Otherwise, return nil.
+  ``
   [zloc pred]
   (when-let [left-sib (z/left zloc)]
     (if (pred left-sib)
@@ -2336,11 +2397,36 @@
                       #
                       true))
       z/node)
-  # => [:symbol @{:bc 1 :bl 2 :ec 2 :el 2} "+"]
+  # =>
+  [:symbol @{:bc 1 :bl 2 :ec 2 :el 2} "+"]
+
+  (-> [:code @{}
+       [:tuple @{}
+        [:keyword @{} ":a"]]]
+      zip-down
+      z/down
+      (left-until |(match (z/node $)
+                      [:comment]
+                      false
+                      #
+                      [:whitespace]
+                      false
+                      #
+                      true)))
+  # =>
+  nil
 
   )
 
 (defn left-skip-wsc
+  ``
+  Try to move left from `zloc`, skipping over whitespace
+  and comment nodes.
+
+  When at least one left move succeeds, return the z-location
+  for the last successful left move destination.  Otherwise,
+  return nil.
+  ``
   [zloc]
   (left-until zloc
                |(match (z/node $)
@@ -2367,7 +2453,8 @@
       right-skip-wsc
       left-skip-wsc
       z/node)
-  # => [:symbol @{:bc 1 :bl 2 :ec 2 :el 2} "+"]
+  # =>
+  [:symbol @{:bc 1 :bl 2 :ec 2 :el 2} "+"]
 
   )
 
@@ -2376,14 +2463,18 @@
 (def j/end? end?)
 (def j/insert-child insert-child)
 (def j/insert-left insert-left)
+(def j/insert-right insert-right)
 (def j/left left)
 (def j/node node)
 (def j/replace replace)
 (def j/right right)
+(def j/rightmost rightmost)
 (def j/right-until right-until)
 (def j/root root)
+(def j/unwrap unwrap)
 (def j/up up)
 (def j/wrap wrap)
+(def j/zip zip)
 (def j/zip-down zip-down)
 
 # ti == test indicator, which can look like any of:
@@ -2771,14 +2862,17 @@
              (set found-test true)
              (wrap-as-test-call start-zloc end-zloc test-label)))))
   # navigate back out to top of block
-  (if found-test
-    # morph comment block into upscope block if a test was found
+  (when found-test
+    # morph comment block into plain tuple -- to be unwrapped later
     (-> curr-zloc
         j/up
         j/down
-        (j/replace [:symbol @{} "upscope"])
-        j/up)
-    (j/up curr-zloc)))
+        (j/replace [:whitespace @{} "\n"])
+        # begin hack to prevent trailing whitespace once unwrapping occurs
+        j/rightmost
+        (j/insert-right [:keyword @{} ":smile"])
+        # end of hack
+        j/up)))
 
 (comment
 
@@ -2805,7 +2899,8 @@
       j/root
       l/code)
   # =>
-  (string "(upscope"                     "\n"
+  (string "("                            "\n"
+          "\n"
           "\n"
           "  (def a 1)"                  "\n"
           "\n"
@@ -2819,7 +2914,7 @@
           "  # => right"                 "\n"
           `  2 "line-10 => right")`      "\n"
           "\n"
-          "  )")
+          "  :smile)")
 
   )
 
@@ -2852,7 +2947,8 @@
 
   (rewrite-comment-block src)
   # =>
-  (string "(upscope"                      "\n"
+  (string "("                             "\n"
+          "\n"
           "\n"
           "  (def a 1)"                   "\n"
           "\n"
@@ -2866,7 +2962,7 @@
           "  # left => right"             "\n"
           `  2 "line-10 left => right")`  "\n"
           "\n"
-          "  )")
+          "  :smile)")
 
   )
 
@@ -2888,9 +2984,12 @@
                             |(match (j/node $)
                                [:tuple _ [:symbol _ "comment"]]
                                true))]
-      # rewrite the located top-level comment block
+      # may be rewrite the located top-level comment block
       (set curr-zloc
-           (rewrite-comment-zloc comment-zloc))
+           (if-let [rewritten-zloc
+                    (rewrite-comment-zloc comment-zloc)]
+             (j/unwrap rewritten-zloc)
+             comment-zloc))
       (break)))
   (-> curr-zloc
       j/root
@@ -2951,7 +3050,8 @@
           "  [x]"                 "\n"
           "  (+ x 1))"            "\n"
           "\n"
-          "(upscope"              "\n"
+          "\n"
+          "\n"
           "\n"
           "  (def a 1)"           "\n"
           "\n"
@@ -2965,13 +3065,14 @@
           "  # =>"                "\n"
           `  2 "line-16")`        "\n"
           "\n"
-          "  )"                   "\n"
+          "  :smile"              "\n"
           "\n"
           "(defn your-fn"         "\n"
           "  [y]"                 "\n"
           "  (* y y))"            "\n"
           "\n"
-          "(upscope"              "\n"
+          "\n"
+          "\n"
           "\n"
           "  (_verify/is"         "\n"
           "  (your-fn 3)"         "\n"
@@ -2987,7 +3088,7 @@
           "\n"
           "  (def c 2)"           "\n"
           "\n"
-          "  )"                   "\n")
+          "  :smile"              "\n")
 
   )
 
@@ -3019,7 +3120,8 @@
   (rewrite src)
   # =>
   (string "\n"
-          "(upscope"         "\n"
+          "\n"
+          "\n"
           "\n"
           "  (_verify/is"    "\n"
           "  (-> ``"         "\n"
@@ -3038,7 +3140,7 @@
           "  # =>"           "\n"
           `  9 "line-15")`   "\n"
           "\n"
-          "  )")
+          "  :smile")
 
   )
 
@@ -3639,9 +3741,9 @@
   (def src-root
     (path/join proj-root name/prog-name))
 
-  (handle-one {:judge-dir-name name/dot-dir-name
-               :proj-root proj-root
-               :src-root src-root})
+  (runner/handle-one {:judge-dir-name name/dot-dir-name
+                      :proj-root proj-root
+                      :src-root src-root})
 
   )
 

@@ -3,6 +3,7 @@
 # https://www.w3.org/TR/xml
 (def xmlish-peg
   ~{:main (sequence (opt (drop :xml-declaration))
+                    (opt (drop :doctype))
                     (any :comment)
                     :element
                     (any :comment))
@@ -11,6 +12,11 @@
                       :s* "<?xml" :s*
                       (any :attribute) :s*
                       "?>" :s*)
+    # XXX: only handles very simple case
+    :doctype (sequence
+               :s* "<!doctype" :s*
+               :tag-name :s*
+               ">" :s*)
     # XXX: not accurate
     :attribute (sequence
                 (capture (to (set " /<=>\""))) :s*
@@ -81,6 +87,27 @@
   (peg/match
     xmlish-peg
     ``
+    <html>
+    <body>
+    <a href="https://janet-lang.org/">Janet Home Page</a>
+    </body>
+    </html>
+    ``)
+  # =>
+  @[{:content @["\n"
+                {:content @["\n"
+                            {:attrs @{"href" "https://janet-lang.org/"}
+                             :content @["Janet Home Page"]
+                             :tag "a"}
+                            "\n"]
+                 :tag "body"}
+                "\n"]
+     :tag "html"}]
+
+  (peg/match
+    xmlish-peg
+    ``
+    <!doctype html>
     <html>
     <body>
     <a href="https://janet-lang.org/">Janet Home Page</a>

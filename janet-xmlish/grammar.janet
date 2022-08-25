@@ -21,7 +21,9 @@
     :attribute (sequence
                 (capture (to (set " /<=>\""))) :s*
                 "=" :s*
-                "\"" (capture (to (set "\""))) "\"" :s*)
+                (choice (sequence `"` (capture (to `"`)) `"`)
+                        (sequence "'" (capture (to "'")) "'"))
+                :s*)
     # section 2.5 of xml spec
     :comment (sequence
               "<!--"
@@ -124,6 +126,23 @@
                  :tag "body"}
                 "\n"]
      :tag "html"}]
+
+  (peg/match
+    xmlish-peg
+    ``
+    <?xml version='1.0' encoding="utf-8"?>
+    <some>
+      <xml>
+      here
+      </xml>
+    </some>
+    ``)
+  # =>
+  @[{:content @["\n  "
+                {:content @["\n  here\n  "]
+                 :tag "xml"}
+                "\n"]
+     :tag "some"}]
 
   (peg/match
     xmlish-peg

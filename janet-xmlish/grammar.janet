@@ -1,5 +1,3 @@
-# the peg uses the new `to`: https://github.com/janet-lang/janet/commit/6d096551f05b5a1bab300f3fb80e1c9193d7f1f6
-
 # https://www.w3.org/TR/xml
 (def xmlish-peg
   ~{:main (sequence (opt (drop :xml-declaration))

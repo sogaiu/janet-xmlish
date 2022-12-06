@@ -53,5 +53,5 @@ Evaluation might yield:
 
 ## More Examples
 
-See `(comment ...)` form a bit after the first `def` in [grammar.janet](./janet-xmlish/grammar.janet) for more examples.
+See `(comment ...)` portions of source files and files in `usages` for examples.
 

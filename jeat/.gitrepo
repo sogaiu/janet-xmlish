@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/sogaiu/janet-expr-as-tests
+	branch = master
+	commit = f95591ef3c781590653038c0f2bf7a2839721a85
+	parent = e6e4d0e9616c9e9cfe2ada966bf653b1d9f7e858
+	method = merge
+	cmdver = 0.4.9

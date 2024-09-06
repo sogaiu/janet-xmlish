@@ -86,14 +86,13 @@
 
   (peg/match
     xmlish-peg
-    ``
-    <?xml version='1.0' encoding="utf-8"?>
-    <some>
-      <xml>
-      here
-      </xml>
-    </some>
-    ``)
+    (string
+      `<?xml version='1.0' encoding="utf-8"?>` "\n"
+      `<some>`                                 "\n"
+      `  <xml>`                                "\n"
+      `  here`                                 "\n"
+      `  </xml>`                               "\n"
+      `</some>`))
   # =>
   @[{:content @["\n  "
                 {:content @["\n  here\n  "]
@@ -104,65 +103,64 @@
   # pushing the bounds of reasonableness for expressing this way?
   (peg/match
     xmlish-peg
-    ``
-    <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-    <rss version="2.0">
-    <channel>
-      <title>RSS Title</title>
-      <description>This is an example of an RSS feed</description>
-      <link>http://www.example.com/main.html</link>
-      <lastBuildDate>Mon, 06 Sep 2010 00:01:00 +0000 </lastBuildDate>
-      <pubDate>Sun, 06 Sep 2009 16:20:00 +0000</pubDate>
-      <ttl>1800</ttl>
-      <item>
-        <title>Example entry</title>
-        <description>Here is some text containing an interesting description.</description>
-        <link>http://www.example.com/blog/post/1</link>
-        <guid isPermaLink="false">7bd204c6-1655-4c27-aeee-53f933c5395f</guid>
-        <pubDate>Sun, 06 Sep 2009 16:20:00 +0000</pubDate>
-      </item>
-    </channel>
-    </rss>
-    ``)
+    (string
+      `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>` "\n"
+      `<rss version="2.0">` "\n"
+      `<channel>` "\n"
+      `<title>RSS Title</title>` "\n"
+      `<description>This is an example of an RSS feed</description>` "\n"
+      `<link>http://www.example.com/main.html</link>` "\n"
+      `<lastBuildDate>Mon, 06 Sep 2010 00:01:00 +0000 </lastBuildDate>` "\n"
+      `<pubDate>Sun, 06 Sep 2009 16:20:00 +0000</pubDate>` "\n"
+      `<ttl>1800</ttl>` "\n"
+      `<item>` "\n"
+      `  <title>Example entry</title>` "\n"
+      `  <description>A description.</description>` "\n"
+      `  <link>http://www.example.com/blog/post/1</link>` "\n"
+      `  <guid isPermaLink="false">7bd204c6-1655-4c27-aeee-53f933c5395f</guid>` "\n"
+      `  <pubDate>Sun, 06 Sep 2009 16:20:00 +0000</pubDate>` "\n"
+      `  </item>` "\n"
+      `</channel>` "\n"
+      `</rss>`))
   # =>
   @[{:content
      @["\n"
        {:content
-        @["\n  "
+        @["\n"
           {:content @["RSS Title"]
            :tag "title"}
-          "\n  "
+          "\n"
           {:content @["This is an example of an RSS feed"]
            :tag "description"}
-          "\n  "
+          "\n"
           {:content @["http://www.example.com/main.html"]
            :tag "link"}
-          "\n  "
+          "\n"
           {:content @["Mon, 06 Sep 2010 00:01:00 +0000 "]
            :tag "lastBuildDate"}
-          "\n  "
+          "\n"
           {:content @["Sun, 06 Sep 2009 16:20:00 +0000"]
            :tag "pubDate"}
-          "\n  "
+          "\n"
           {:content @["1800"]
            :tag "ttl"}
-          "\n  "
+          "\n"
           {:content
-           @["\n    "
+           @["\n  "
              {:content @["Example entry"]
               :tag "title"}
-             "\n    "
+             "\n  "
              {:content
-              @["Here is some text containing an interesting description."]
+              @["A description."]
               :tag "description"}
-             "\n    "
+             "\n  "
              {:content @["http://www.example.com/blog/post/1"]
               :tag "link"}
-             "\n    "
+             "\n  "
              {:content @["7bd204c6-1655-4c27-aeee-53f933c5395f"]
               :tag "guid"
               :attrs @{"isPermaLink" "false"}}
-             "\n    "
+             "\n  "
              {:content @["Sun, 06 Sep 2009 16:20:00 +0000"]
               :tag "pubDate"}
              "\n  "]
@@ -174,3 +172,4 @@
      :attrs @{"version" "2.0"}}]
 
   )
+

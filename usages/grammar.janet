@@ -4,13 +4,11 @@
 
   (peg/match
     xmlish-peg
-    ``
-    <html>
-    <body>
-    <a href="https://janet-lang.org/">Janet Home Page</a>
-    </body>
-    </html>
-    ``)
+    (string `<html>` "\n"
+            `<body>` "\n"
+            `<a href="https://janet-lang.org/">Janet Home Page</a>` "\n"
+            `</body>` "\n"
+            `</html>`))
   # =>
   @[{:content @["\n"
                 {:content @["\n"
@@ -24,14 +22,12 @@
 
   (peg/match
     xmlish-peg
-    ``
-    <!doctype html>
-    <html>
-    <body>
-    <a href="https://janet-lang.org/">Janet Home Page</a>
-    </body>
-    </html>
-    ``)
+    (string `<!doctype html>` "\n"
+            `<html>` "\n"
+            `<body>` "\n"
+            `<a href="https://janet-lang.org/">Janet Home Page</a>` "\n"
+            `</body>` "\n"
+            `</html>`))
   # =>
   @[{:content @["\n"
                 {:content @["\n"
@@ -45,51 +41,37 @@
 
   (peg/match
     xmlish-peg
-    ``
-    <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-    <hi>hello</hi>
-    ``)
+    (string `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>` "\n"
+            "<hi>hello</hi>"))
   # =>
   @[{:content @["hello"] :tag "hi"}]
 
-  (peg/match
-    xmlish-peg
-    ``
-    <hi/>
-    ``)
+  (peg/match xmlish-peg "<hi/>")
   # =>
   @[{:tag "hi"}]
 
-  (peg/match xmlish-peg
-             ``<hi a="1" b="2"/>``)
+  (peg/match xmlish-peg `<hi a="1" b="2"/>`)
   # =>
   @[{:tag "hi"
      :attrs @{"a" "1" "b" "2"}}]
 
-  (peg/match xmlish-peg
-             ``<hi a="smile" b="breath" >hello</hi>``)
+  (peg/match xmlish-peg `<hi a="smile" b="breath" >hello</hi>`)
   # =>
   @[{:content @["hello"]
      :tag "hi"
      :attrs @{"a" "smile" "b" "breath"}}]
 
-  (peg/match
-    xmlish-peg
-    ``
-    <ho></ho>
-    ``)
+  (peg/match xmlish-peg "<ho></ho>")
   # =>
   @[{:tag "ho"}]
 
-  (peg/match xmlish-peg
-             "<bye><hi>there</hi></bye>")
+  (peg/match xmlish-peg "<bye><hi>there</hi></bye>")
   # =>
   @[{:content @[{:content @["there"]
                  :tag "hi"}]
      :tag "bye"}]
 
-  (peg/match xmlish-peg
-             "<bye><hi>the<smile></smile>re</hi></bye>")
+  (peg/match xmlish-peg "<bye><hi>the<smile></smile>re</hi></bye>")
   # =>
   @[{:content @[{:content @["the"
                             {:tag "smile"}
@@ -97,11 +79,7 @@
                  :tag "hi"}]
      :tag "bye"}]
 
-  (peg/match
-    xmlish-peg
-    ``
-    <hi>hello<bye></bye></hi>
-    ``)
+  (peg/match xmlish-peg "<hi>hello<bye></bye></hi>")
   # =>
   @[{:content @["hello" {:tag "bye"}]
      :tag "hi"}]
@@ -120,10 +98,8 @@
 
   (peg/match
     xmlish-peg
-    ``
-    <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-    <a><!-- b --><c><!-- d --><e/></c></a>
-    ``)
+    (string `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>` "\n"
+            "<a><!-- b --><c><!-- d --><e/></c></a>"))
   # =>
   @[{:content @[{:content @[{:tag "e"}]
                  :tag "c"}]
@@ -131,12 +107,11 @@
 
   (peg/match
     xmlish-peg
-    ``
-    <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
-    <oops>💩</oops>
-    ``)
+    (string `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>` "\n"
+            "<oops>💩</oops>"))
   # =>
   @[{:content @["\xF0\x9F\x92\xA9"]
      :tag "oops"}]
 
   )
+

@@ -12,9 +12,22 @@
                       "?>" :s*)
     # XXX: only handles very simple case
     :doctype (sequence
-               :s* "<!doctype" :s*
+               :s* "<!" :doctype-icase :s*
                :tag-name :s*
                ">" :s*)
+
+    # handle all permutations of upper/lower case characters in 'DOCTYPE'
+    # if we wanted to do this strictly by the book, the spec only allows for
+    # all-caps DOCTYPE (section 2.8).
+    :doctype-icase (sequence
+                    (choice "d" "D")
+                    (choice "o" "O")
+                    (choice "c" "C")
+                    (choice "t" "T")
+                    (choice "y" "Y")
+                    (choice "p" "P")
+                    (choice "e" "E"))
+
     # XXX: not accurate
     :attribute (sequence
                 (capture (to (set " /<=>\""))) :s*

@@ -10,11 +10,27 @@
                       :s* "<?xml" :s*
                       (any :attribute) :s*
                       "?>" :s*)
-    # XXX: only handles very simple case
+    # XXX: this does not handle internal DTD subsets, only external DTD subsets.
     :doctype (sequence
                :s* "<!" :doctype-icase :s*
-               :tag-name :s*
+               :tag-name :s* (opt :external-id) :s*
                ">" :s*)
+
+    # section 4.2.2
+    :external-id (choice
+                  (sequence "SYSTEM" :s* :system-literal)
+                  (sequence "PUBLIC" :s* :pub-id-literal :s* :system-literal))
+
+    # section 2.3
+    :system-literal (choice
+                     (sequence `"` (any (if-not `"` 1)) `"`)
+                     (sequence `'` (any (if-not `'` 1)) `'`))
+    :pub-id-literal (choice
+                     (sequence `"` (any :pub-id-character) `"`)
+                     (any (sequence `'` :pub-id-character `-` `'`)))
+    :pub-id-character (choice
+                       (set " \r\n-'()+,./:=?;!*#@$_%")
+                       (range "az" "AZ" "09"))
 
     # handle all permutations of upper/lower case characters in 'DOCTYPE'
     # if we wanted to do this strictly by the book, the spec only allows for

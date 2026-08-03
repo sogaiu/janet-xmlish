@@ -51,10 +51,10 @@
                          "/>")
                         ,|(let [args $&
                                 elt-name (first args)
-                                attrs (drop 1 args)
-                                attrs (if (= (length attrs) 0)
+                                attrs_ (drop 1 args)
+                                attrs (if (= (length attrs_) 0)
                                         nil
-                                        (table ;attrs))]
+                                        (table ;attrs_))]
                             {:attrs attrs
                              :tag elt-name}))
     #
@@ -63,24 +63,23 @@
                    (any (choice (capture :pcdata)
                                 :comment
                                 :element
-                                (capture :content)
-                                ))
+                                (capture :content)))
                    :close-tag)
          ,|(let [args $&
                  open-name (first (first args))
-                 attrs (drop 1 (first args))
+                 attrs_ (drop 1 (first args))
                  close-name (last args)]
              (when (= open-name close-name)
                (let [elt-name open-name
-                     content (filter (fn [c-item]
+                     content_ (filter (fn [c-item]
                                        (not= "" c-item))
                                      (tuple/slice args 1 -2))
-                     content (if (= (length content) 0)
+                     content (if (= (length content_) 0)
                                nil
-                               content)
-                     attrs (if (= (length attrs) 0)
+                               content_)
+                     attrs (if (= (length attrs_) 0)
                              nil
-                             (table ;attrs))]
+                             (table ;attrs_))]
                  {:attrs attrs
                   :content content
                   :tag elt-name}))))

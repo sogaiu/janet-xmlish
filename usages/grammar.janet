@@ -22,7 +22,7 @@
 
   (peg/match
     xmlish-peg
-    (string `<!doctype html>` "\n"
+    (string `<!DOCTYPE html>` "\n"
             `<html>` "\n"
             `<body>` "\n"
             `<a href="https://janet-lang.org/">Janet Home Page</a>` "\n"

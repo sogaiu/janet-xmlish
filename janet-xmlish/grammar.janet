@@ -10,7 +10,7 @@
                                (any :attribute) :s*
                                "?>")
     # XXX: only handles very simple case
-    :doctype (sequence :s* "<!doctype" :s*
+    :doctype (sequence :s* "<!" (choice "DOCTYPE" "doctype") :s*
                        :tag-name :s*
                        ">")
     # XXX: not accurate

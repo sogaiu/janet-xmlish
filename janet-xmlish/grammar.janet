@@ -1,25 +1,40 @@
 # https://www.w3.org/TR/xml
 (def xmlish-peg
-  ~{:main (sequence (opt (drop :xml-declaration)) :s*
-                    (opt (drop :doctype)) :s*
-                    (any :comment) :s*
-                    :element :s*
-                    (any :comment) :s*)
-    #
-    :xml-declaration (sequence :s* "<?xml" :s*
-                               (any :attribute) :s*
+  ~{:main (sequence (opt (drop :xml-declaration)) :ws*
+                    (opt (drop :doctype)) :ws*
+                    (any :comment) :ws*
+                    :element :ws*
+                    (any :comment) :ws*)
+    # XXX: see spec for whitespace details
+    :xml-declaration (sequence :ws* "<?xml" :ws*
+                               (any :attribute) :ws*
                                "?>")
-    # XXX: only handles very simple case
-    :doctype (sequence :s* "<!" (choice "DOCTYPE" "doctype") :s*
-                       :name :s*
+    # section 2.3 of xml spec
+    :ws (set " \t\r\n")
+    :ws+ (some :ws)
+    :ws* (any :ws)
+    # XXX: does not handle internal subset, see section 2.8 of xml spec
+    :doctype (sequence :ws* "<!" (choice "DOCTYPE" "doctype") :ws+
+                       :name (opt (sequence :ws+ :external-id)) :ws*
                        ">")
-    # XXX: not accurate
+    # section 4.2.2 of xml spec
+    :external-id
+    (choice (sequence "SYSTEM" :ws+ :system-literal)
+            (sequence "PUBLIC" :ws+ :pubid-literal :ws+ :system-literal))
+    # section 2.3 of xml spec
+    :system-literal (choice (sequence `"` (capture (to `"`)) `"`)
+                            (sequence "'" (capture (to "'")) "'"))
+    :pubid-literal (choice (sequence `"` (any :pubid-char) `"`)
+                           (sequence "'" (any :pubid-char-wo-quote) "'"))
+    :pubid-char (choice :pubid-char-wo-quote "'")
+    :pubid-char-wo-quote (choice :w (set ` \r\n-()+,./:=?;!*#@$_%`))
+    # XXX: not accurate, see section 3.1 of xml spec
     :attribute (sequence
-                (capture (to (set " /<=>\""))) :s*
-                "=" :s*
+                (capture (to (set " /<=>\""))) :ws*
+                "=" :ws*
                 (choice (sequence `"` (capture (to `"`)) `"`)
                         (sequence "'" (capture (to "'")) "'"))
-                :s*)
+                :ws*)
     # section 2.5 of xml spec
     :comment (sequence
               "<!--"
@@ -31,7 +46,7 @@
     :element (choice :empty-element :non-empty-element)
     #
     :empty-element (cmt (sequence
-                         "<" (capture :name) :s*
+                         "<" (capture :name) :ws*
                          (any :attribute)
                          "/>")
                         ,|(let [args $&
@@ -69,17 +84,17 @@
                  {:attrs attrs
                   :content content
                   :tag elt-name}))))
-    # XXX: could use work?
+    # XXX: this is a hack, see section 2.3 of xml spec
     :name (sequence (not "!") (not "?") (to (set " /<>")))
     #
     :open-tag (group
                 (sequence
-                  "<" (capture :name) :s*
+                  "<" (capture :name) :ws*
                   (any :attribute)
                   ">"))
     #
     :close-tag (sequence
-                 "</" (capture :name) :s* ">")
+                 "</" (capture :name) :ws* ">")
     # XXX: may not be accurate
     :pcdata (sequence "<![CDATA[" (to "]]>") "]]>")
     # XXX: may not be accurate

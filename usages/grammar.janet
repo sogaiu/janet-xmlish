@@ -433,3 +433,79 @@
 
   )
 
+(comment
+
+  (def tosec-luxor-abc-806
+    ``
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "http://www.logiqx.com/Dats/datafile.dtd">
+
+    <datafile>
+            <header>
+                    <name>Luxor ABC 806 - Applications</name>
+                    <description>Luxor ABC 806 - Applications (TOSEC-v2018-03-08)</description>
+                    <category>TOSEC</category>
+                    <version>2018-03-08</version>
+                    <author>mictlantecuhtle</author>
+                    <email>contact@tosecdev.org</email>
+                    <homepage>TOSEC</homepage>
+                    <url>http://www.tosecdev.org/</url>
+            </header>
+            <game name="Graf806 (198x)(-)">
+                    <description>Graf806 (198x)(-)</description>
+                    <rom name="Graf806 (198x)(-).td0" size="199707" crc="96e86f58" md5="628ecf524c94c1804f42820e7d0bba01" sha1="187bb2528b7cbccc9dcf96c2824b4f9cff394064"/>
+            </game>
+    </datafile>
+    ``)
+
+  (peg/match xmlish-peg tosec-luxor-abc-806)
+  # =>
+  @[{:content
+     @["\n        "
+       {:content
+        @["\n                "
+          {:content @["Luxor ABC 806 - Applications"]
+           :tag "name"}
+          "\n                "
+          {:content @["Luxor ABC 806 - Applications (TOSEC-v2018-03-08)"]
+           :tag "description"}
+          "\n                "
+          {:content @["TOSEC"]
+           :tag "category"}
+          "\n                "
+          {:content @["2018-03-08"]
+           :tag "version"}
+          "\n                "
+          {:content @["mictlantecuhtle"]
+           :tag "author"}
+          "\n                "
+          {:content @["contact@tosecdev.org"]
+           :tag "email"}
+          "\n                "
+          {:content @["TOSEC"]
+           :tag "homepage"}
+          "\n                "
+          {:content @["http://www.tosecdev.org/"]
+           :tag "url"}
+          "\n        "]
+        :tag "header"}
+       "\n        "
+       {:attrs @{"name" "Graf806 (198x)(-)"}
+        :content
+        @["\n                "
+          {:content @["Graf806 (198x)(-)"]
+           :tag "description"}
+          "\n                "
+          {:attrs @{"crc" "96e86f58"
+                    "md5" "628ecf524c94c1804f42820e7d0bba01"
+                    "name" "Graf806 (198x)(-).td0"
+                    "sha1" "187bb2528b7cbccc9dcf96c2824b4f9cff394064"
+                    "size" "199707"}
+           :tag "rom"}
+          "\n        "]
+        :tag "game"}
+       "\n"]
+     :tag "datafile"}]
+
+  )
+

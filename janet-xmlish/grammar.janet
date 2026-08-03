@@ -11,7 +11,7 @@
                                "?>")
     # XXX: only handles very simple case
     :doctype (sequence :s* "<!" (choice "DOCTYPE" "doctype") :s*
-                       :tag-name :s*
+                       :name :s*
                        ">")
     # XXX: not accurate
     :attribute (sequence
@@ -31,7 +31,7 @@
     :element (choice :empty-element :non-empty-element)
     #
     :empty-element (cmt (sequence
-                         "<" (capture :tag-name) :s*
+                         "<" (capture :name) :s*
                          (any :attribute)
                          "/>")
                         ,|(let [args $&
@@ -70,16 +70,16 @@
                   :content content
                   :tag elt-name}))))
     # XXX: could use work?
-    :tag-name (sequence (not "!") (not "?") (to (set " /<>")))
+    :name (sequence (not "!") (not "?") (to (set " /<>")))
     #
     :open-tag (group
                 (sequence
-                  "<" (capture :tag-name) :s*
+                  "<" (capture :name) :s*
                   (any :attribute)
                   ">"))
     #
     :close-tag (sequence
-                 "</" (capture :tag-name) :s* ">")
+                 "</" (capture :name) :s* ">")
     # XXX: may not be accurate
     :pcdata (sequence "<![CDATA[" (to "]]>") "]]>")
     # XXX: may not be accurate

@@ -1,20 +1,18 @@
 # https://www.w3.org/TR/xml
 (def xmlish-peg
-  ~{:main (sequence (opt (drop :xml-declaration))
-                    (opt (drop :doctype))
-                    (any :comment)
-                    :element
-                    (any :comment))
+  ~{:main (sequence (opt (drop :xml-declaration)) :s*
+                    (opt (drop :doctype)) :s*
+                    (any :comment) :s*
+                    :element :s*
+                    (any :comment) :s*)
     #
-    :xml-declaration (sequence
-                      :s* "<?xml" :s*
-                      (any :attribute) :s*
-                      "?>" :s*)
+    :xml-declaration (sequence :s* "<?xml" :s*
+                               (any :attribute) :s*
+                               "?>")
     # XXX: only handles very simple case
-    :doctype (sequence
-               :s* "<!doctype" :s*
-               :tag-name :s*
-               ">" :s*)
+    :doctype (sequence :s* "<!doctype" :s*
+                       :tag-name :s*
+                       ">")
     # XXX: not accurate
     :attribute (sequence
                 (capture (to (set " /<=>\""))) :s*
@@ -28,7 +26,7 @@
               (any (choice
                     (if-not (set "-") 1)
                     (sequence "-" (if-not (set "-") 1))))
-              "-->" :s*)
+              "-->")
     #
     :element (choice :empty-element :non-empty-element)
     #
@@ -44,43 +42,48 @@
                                         (table ;attrs))]
                             {:attrs attrs
                              :tag elt-name}))
-    # XXX: not accurate
-    :tag-name (to (set " /<>"))
     #
-    :non-empty-element (cmt (sequence
-                             :open-tag
-                             (any
-                              (choice :comment :element (capture :pcdata)))
-                             :close-tag)
-                            ,|(let [args $&
-                                    open-name (first (first args))
-                                    attrs (drop 1 (first args))
-                                    close-name (last args)]
-                                (when (= open-name close-name)
-                                  (let [elt-name open-name
-                                        content (filter (fn [c-item]
-                                                          (not= "" c-item))
-                                                        (tuple/slice args 1 -2))
-                                        content (if (= (length content) 0)
-                                                  nil
-                                                  content)
-                                        attrs (if (= (length attrs) 0)
-                                                nil
-                                                (table ;attrs))]
-                                    {:attrs attrs
-                                     :content content
-                                     :tag elt-name}))))
+    :non-empty-element
+    (cmt (sequence :open-tag
+                   (any (choice (capture :pcdata)
+                                :comment
+                                :element
+                                (capture :content)
+                                ))
+                   :close-tag)
+         ,|(let [args $&
+                 open-name (first (first args))
+                 attrs (drop 1 (first args))
+                 close-name (last args)]
+             (when (= open-name close-name)
+               (let [elt-name open-name
+                     content (filter (fn [c-item]
+                                       (not= "" c-item))
+                                     (tuple/slice args 1 -2))
+                     content (if (= (length content) 0)
+                               nil
+                               content)
+                     attrs (if (= (length attrs) 0)
+                             nil
+                             (table ;attrs))]
+                 {:attrs attrs
+                  :content content
+                  :tag elt-name}))))
+    # XXX: could use work?
+    :tag-name (sequence (not "!") (not "?") (to (set " /<>")))
     #
     :open-tag (group
-               (sequence
-                "<" (capture :tag-name) :s*
-                (any :attribute)
-                ">"))
-    # XXX: not accurate
-    :pcdata (to (set "<>"))
+                (sequence
+                  "<" (capture :tag-name) :s*
+                  (any :attribute)
+                  ">"))
     #
     :close-tag (sequence
-                "</" (capture :tag-name) :s* ">")})
+                 "</" (capture :tag-name) :s* ">")
+    # XXX: may not be accurate
+    :pcdata (sequence "<![CDATA[" (to "]]>") "]]>")
+    # XXX: may not be accurate
+    :content (to "<")})
 
 (comment
 

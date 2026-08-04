@@ -55,3 +55,8 @@ Evaluation might yield:
 
 See `(comment ...)` portions of source files and files in `usages` for examples.
 
+## Credits
+
+* snickerbockers - issues and samples
+* veqqq - feed use
+

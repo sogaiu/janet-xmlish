@@ -1,0 +1,4679 @@
+#! /usr/bin/env janet
+
+(comment import ./args :prefix "")
+(comment import ./errors :prefix "")
+(defn e/makef
+  [base fmt & args]
+  (merge base {:msg (string/format fmt ;args)}))
+
+(defn e/emf
+  [base fmt & args]
+  (error (e/makef base fmt ;args)))
+
+# XXX: use l/note?
+(defn e/show
+  [err]
+  (assertf (dictionary? err) "expected dictionary but got: %n" err)
+  #
+  (eprintf "%s: %s" (get err :in) (get err :msg))
+  (when (os/getenv "VERBOSE")
+    (when-let [args (get err :args)]
+      (eprint "  args:")
+      (eachp [n v] args
+        (eprintf "    %s: %n" n v)))
+    (when-let [locals (get err :locals)]
+      (eprint "  locals:")
+      (eachp [n v] locals
+        (eprintf "    %s: %n" n v)))
+    (when-let [e (get err :e-via-try)]
+      (eprintf "  e via try: %n" e))
+    (when-let [st (get err :stacktrace)]
+      (eprint "  stacktrace:")
+      (def lines (string/split "\n" st))
+      (each l lines
+        (eprint "    " l)))))
+
+
+(comment import ./files :prefix "")
+(comment import ./paths :prefix "")
+(def p/sep
+  (let [tos (os/which)]
+    (if (or (= :windows tos) (= :mingw tos)) `\` "/")))
+
+(defn p/clean-end-of-path
+  [path a-sep]
+  (when (one? (length path))
+    (break path))
+  (if (string/has-suffix? a-sep path)
+    (string/slice path 0 -2)
+    path))
+
+(comment
+
+  (p/clean-end-of-path "hello/" "/")
+  # =>
+  "hello"
+
+  (p/clean-end-of-path "/" "/")
+  # =>
+  "/"
+
+  )
+
+(defn p/parse-path
+  [path]
+  (def revcap-peg
+    ~(sequence (capture (sequence (choice (to (choice "/" `\`))
+                                          (thru -1))))
+               (capture (thru -1))))
+  (when-let [[rev-name rev-dir]
+             (-?>> (string/reverse path)
+                   (peg/match revcap-peg)
+                   (map string/reverse))]
+    [(or rev-dir "") rev-name]))
+
+(comment
+
+  (p/parse-path "/tmp/fun/my.fnl")
+  # =>
+  ["/tmp/fun/" "my.fnl"]
+
+  (p/parse-path "/my.janet")
+  # =>
+  ["/" "my.janet"]
+
+  (p/parse-path "pp.el")
+  # =>
+  ["" "pp.el"]
+
+  (p/parse-path "/etc/init.d")
+  # =>
+  ["/etc/" "init.d"]
+
+  (p/parse-path "/")
+  # =>
+  ["/" ""]
+
+  (p/parse-path "")
+  # =>
+  ["" ""]
+
+  )
+
+
+
+(defn f/is-file?
+  [path]
+  #
+  (= :file (os/stat path :mode)))
+
+(defn f/find-files
+  [dir &opt pred]
+  (default pred identity)
+  (def paths @[])
+  (defn helper
+    [a-dir]
+    (each path (os/dir a-dir)
+      (def sub-path (string a-dir p/sep path))
+      (case (os/stat sub-path :mode)
+        :directory
+        (when (not= path ".git")
+          (helper sub-path))
+        #
+        :file
+        (when (pred sub-path)
+          (array/push paths sub-path)))))
+  (helper dir)
+  paths)
+
+(comment
+
+  (f/find-files "." |(string/has-suffix? ".janet" $))
+
+  )
+
+(defn f/has-janet-shebang?
+  [path]
+  (with [f (file/open path)]
+    (def first-line (file/read f :line))
+    (when first-line
+      (and (string/find "env" first-line)
+           (string/find "janet" first-line)))))
+
+(defn f/collect-paths
+  [includes &opt pred]
+  (default pred identity)
+  (def filepaths @[])
+  # collect file and directory paths
+  (each thing includes
+    (def apath (p/clean-end-of-path thing p/sep))
+    (def mode (os/stat apath :mode))
+    # XXX: should :link be supported?
+    (cond
+      (= :file mode)
+      (array/push filepaths apath)
+      #
+      (= :directory mode)
+      (array/concat filepaths (f/find-files apath pred))))
+  #
+  filepaths)
+
+
+(comment import ./settings :prefix "")
+(comment import ./errors :prefix "")
+
+
+(def s/default-conf-file ".niche.jdn")
+
+(defn s/parse-conf-file
+  [&opt conf-file]
+  (default conf-file s/default-conf-file)
+  (def b {:in "parse-conf-file" :args {:conf-file conf-file}})
+  #
+  (let [src (try (slurp conf-file)
+              ([e] (e/emf (merge b {:e-via-try e})
+                          "failed to slurp: %s" conf-file)))
+        cnf (try (parse src)
+              ([e] (e/emf (merge b {:e-via-try e})
+                          "failed to parse: %s" conf-file)))]
+    (when (not cnf)
+      (e/emf b "failed to load: %s" conf-file))
+    #
+    (when (not (dictionary? cnf))
+      (e/emf b "expected dictionary in conf, got: %s" (type cnf)))
+    #
+    [(array ;(get cnf :includes @[]))
+     (array ;(get cnf :excludes @[]))]))
+
+
+
+(defn a/parse-args
+  [args]
+  (def b {:in "parse-args" :args {:args args}})
+  #
+  (def the-args (array ;args))
+  #
+  (def head (get the-args 0))
+  #
+  (def help-types
+    {"--help" :usage
+     "-h" :usage
+     "-hh" :background
+     "-hhh" :tutorial
+     "-hhhh" :reference})
+  (def htype (get help-types head))
+  (when (or htype
+            # might have been invoked with no paths in repository root
+            (and (not head) (not (f/is-file? s/default-conf-file))))
+    (break @{:show-help htype}))
+  #
+  (when (or (= head "-v") (= head "--version")
+            # might have been invoked with no paths in repository root
+            (and (not head) (not (f/is-file? s/default-conf-file))))
+    (break @{:show-version true}))
+  #
+  (def opts
+    (if head
+      (if-not (and (string/has-prefix? "{" head)
+                   (string/has-suffix? "}" head))
+        @{}
+        (let [parsed
+              (try (parse (string "@" head))
+                ([e] (e/emf (merge b {:e-via-try e})
+                            "failed to parse options: %n" head)))]
+          (when (not (and parsed (table? parsed)))
+            (e/emf b "expected table but found: %s" (type parsed)))
+          #
+          (array/remove the-args 0)
+          parsed))
+      @{}))
+  #
+  (def [includes excludes]
+    (cond
+      # paths on command line take precedence over conf file
+      (not (empty? the-args))
+      [the-args @[]]
+      # conf file
+      (f/is-file? s/default-conf-file)
+      (s/parse-conf-file s/default-conf-file)
+      #
+      (e/emf b "unexpected result parsing args: %n" args)))
+  #
+  (setdyn :test/color?
+          (not (or (os/getenv "NO_COLOR") (get opts :no-color))))
+  #
+  (defn merge-indexed
+    [left right]
+    (default left [])
+    (default right [])
+    (distinct [;left ;right]))
+  #
+  (merge {:overwrite true}
+         opts
+         {:includes (merge-indexed includes (get opts :includes))
+          :excludes (merge-indexed excludes (get opts :excludes))}))
+
+(comment
+
+  (def old-value (dyn :test/color?))
+
+  (setdyn :test/color? false)
+
+  (a/parse-args ["src/main.janet"])
+  # =>
+  @{:excludes @[]
+    :includes @["src/main.janet"]
+    :overwrite true}
+
+  (a/parse-args ["-h"])
+  # =>
+  @{:show-help :usage}
+
+  (a/parse-args ["-hh"])
+  # =>
+  @{:show-help :background}
+
+  (a/parse-args ["-hhh"])
+  # =>
+  @{:show-help :tutorial}
+
+  (a/parse-args ["-hhhh"])
+  # =>
+  @{:show-help :reference}
+
+  (a/parse-args ["{:overwrite false}" "src/main.janet"])
+  # =>
+  @{:excludes @[]
+    :includes @["src/main.janet"]
+    :overwrite false}
+
+  (a/parse-args [`{:excludes ["src/args.janet"]}` "src/main.janet"])
+  # =>
+  @{:excludes @["src/args.janet"]
+    :includes @["src/main.janet"]
+    :overwrite true}
+
+  (setdyn :test/color? old-value)
+
+  )
+
+
+(comment import ./commands :prefix "")
+(comment import ./errors :prefix "")
+
+(comment import ./files :prefix "")
+
+(comment import ./log :prefix "")
+# :w - warn
+# :e - error
+# :i - info
+# :o - output
+
+(def l/d-table
+  {:w eprin
+   :e eprin
+   :i eprin
+   :o prin})
+
+(defn l/note
+  [flavor & args]
+  (def disp-table (dyn :d-table l/d-table))
+  (def dispatch-fn (get disp-table flavor))
+  (assertf dispatch-fn "unknown flavor: %n" flavor)
+  #
+  (dispatch-fn ;args))
+
+(def l/df-table
+  {:w eprinf
+   :e eprinf
+   :i eprinf
+   :o prinf})
+
+(defn l/notef
+  [flavor & args]
+  (def disp-table (dyn :df-table l/df-table))
+  (def dispatch-fn (get disp-table flavor))
+  (assertf dispatch-fn "unknown flavor: %n" flavor)
+  #
+  (dispatch-fn ;args))
+
+(def l/dn-table
+  {:w eprint
+   :e eprint
+   :i eprint
+   :o print})
+
+(defn l/noten
+  [flavor & args]
+  (def disp-table (dyn :dn-table l/dn-table))
+  (def dispatch-fn (get disp-table flavor))
+  (assertf dispatch-fn "unknown flavor: %n" flavor)
+  #
+  (dispatch-fn ;args))
+
+(def l/dnf-table
+  {:w eprintf
+   :e eprintf
+   :i eprintf
+   :o printf})
+
+(defn l/notenf
+  [flavor & args]
+  (def disp-table (dyn :dnf-table l/dnf-table))
+  (def dispatch-fn (get disp-table flavor))
+  (assertf dispatch-fn "unknown flavor: %n" flavor)
+  #
+  (dispatch-fn ;args))
+
+########################################################################
+
+(def l/ignore-table
+  {:w (fn :w [& _] nil)
+   :e (fn :e [& _] nil)
+   :i (fn :i [& _] nil)
+   :o (fn :o [& _] nil)})
+
+(defn l/set-d-tables!
+  [{:d d :df df :dn dn :dnf dnf}]
+  (default d l/d-table)
+  (default df l/df-table)
+  (default dn l/dn-table)
+  (default dnf l/dnf-table)
+  (setdyn :d-table d)
+  (setdyn :df-table df)
+  (setdyn :dn-table dn)
+  (setdyn :dnf-table dnf))
+
+(defn l/clear-d-tables!
+  []
+  (l/set-d-tables! {:d l/ignore-table
+                  :df l/ignore-table
+                  :dn l/ignore-table
+                  :dnf l/ignore-table}))
+
+(defn l/reset-d-tables!
+  []
+  (l/set-d-tables! {}))
+
+
+(comment import ./output :prefix "")
+(comment import ./log :prefix "")
+
+
+(def o/color-table
+  {:black 30
+   :blue 34
+   :cyan 36
+   :green 32
+   :magenta 35
+   :red 31
+   :white 37
+   :yellow 33})
+
+(defn o/color-msg
+  [msg color]
+  (def color-num (get o/color-table color))
+  (assertf color-num "unknown color: %n" color)
+  #
+  (if (dyn :test/color?)
+    (string "\e[" color-num "m" msg "\e[0m")
+    msg))
+
+(defn o/prin-color
+  [msg color]
+  (l/note :o (o/color-msg msg color)))
+
+(comment
+
+  (def [ok? result] (protect (o/prin-color "hey" :chartreuse)))
+  # =>
+  [false "unknown color: :chartreuse"]
+
+  )
+
+(defn o/separator
+  [&opt str n]
+  (default str "-")
+  (default n 60)
+  (string/repeat str n))
+
+(defn o/prin-sep
+  [&opt str n]
+  (default str "-")
+  (default n 60)
+  (l/note :o (o/separator str n)))
+
+(defn o/prin-form
+  [form-str &opt color indent]
+  (default color nil)
+  (default indent 0)
+  (def msg (string/trimr form-str))
+  (def lines (string/split "\n" msg))
+  #
+  (def line-0 (get lines 0))
+  (def buf-0 (buffer (if color (o/color-msg line-0 color) line-0)))
+  (l/note :o buf-0)
+  #
+  (def indent-str (string/repeat " " indent))
+  (for i 1 (length lines)
+    (l/noten :o)
+    (def line-i
+      (let [l (get lines i)]
+        (if (string/has-prefix? indent-str l)
+          (buffer/slice l indent)
+          l)))
+    (def buf-i
+      (buffer (if color (o/color-msg line-i color) line-i)))
+    (l/note :o buf-i)))
+
+(defn o/prin-data
+  [form &opt color]
+  (def buf @"")
+  (with-dyns [:out buf]
+    (printf "%m" form))
+  (def msg (string/trimr buf))
+  (def m-buf
+    (buffer (if color (o/color-msg msg color) msg)))
+  (l/note :o m-buf))
+
+(defn o/color-form
+  [form]
+  (def leader
+    (if (or (array? form) (table? form) (buffer? form))
+      "@" ""))
+  (def fmt-str
+    (if (dyn :test/color?) "%M" "%m"))
+  (def buf @"")
+  (cond
+    (indexed? form)
+    (do
+      (buffer/push buf leader "[\n")
+      (each f form
+        (with-dyns [:out buf] (printf fmt-str f)))
+      (buffer/push buf "]"))
+    #
+    (dictionary? form)
+    (do
+      (buffer/push buf leader "{\n")
+      (eachp [k v] form
+        (with-dyns [:out buf]
+          (printf fmt-str k)
+          (printf fmt-str v)))
+      (buffer/push buf "}"))
+    #
+    (with-dyns [:out buf] (printf fmt-str form)))
+  #
+  buf)
+
+(defn o/color-ratio
+  [num denom]
+  (buffer (if (not= num denom)
+            (o/color-msg num :red)
+            (o/color-msg num :green))
+          "/"
+          (o/color-msg denom :green)))
+
+(defn o/report-fails
+  [src {:num-tests _total-tests :fails fails}]
+  (var i 0)
+  (each f fails
+    (def {:test-form _test-form
+          :test-value test-value
+          :expected-value expected-value
+          :line-no line-no
+          :rest rest} f)
+    (++ i)
+    #
+    (l/noten :o)
+    (l/note :o "[")
+    (o/prin-color i :cyan)
+    (l/note :o "]")
+    (l/noten :o)
+    #
+    (l/noten :o)
+    (o/prin-color "failed:" :yellow)
+    (l/noten :o)
+    (o/prin-color (string/format "line %d" line-no) :red)
+    (l/noten :o)
+    #
+    (l/noten :o)
+    (o/prin-color "form:" :yellow)
+    (l/noten :o)
+    (o/prin-form (string/slice src (get rest 0) (get rest 1))
+               nil
+               (get rest 2))
+    (l/noten :o)
+    #
+    (l/noten :o)
+    (o/prin-color "expected:" :yellow)
+    (l/noten :o)
+    (o/prin-data expected-value)
+    (l/noten :o)
+    #
+    (l/noten :o)
+    (o/prin-color "actual:" :yellow)
+    (l/noten :o)
+    (o/prin-data test-value :blue)
+    (l/noten :o)))
+
+(defn o/report-std
+  [content title]
+  (when (and content (pos? (length content)))
+    (def sepa (o/separator "-" (length title)))
+    (l/noten :o sepa)
+    (l/noten :o title)
+    (l/noten :o sepa)
+    (l/noten :o content)))
+
+(defn o/report
+  [input test-results out err]
+  (when (not (empty? (get test-results :fails)))
+    (l/noten :o)
+    (o/prin-sep)
+    #
+    (def src (slurp input))
+    #
+    (o/report-fails src test-results)
+    #
+    (when (and out (pos? (length out)))
+      (l/noten :o)
+      (o/report-std out "stdout"))
+    #
+    (when (and err (pos? (length err)))
+      (l/noten :o)
+      (o/report-std err "stderr"))
+    #
+    (when (and (zero? (get test-results :num-tests))
+               (empty? out)
+               (empty? err))
+      (l/noten :o)
+      (l/noten :o "no test output...possibly no tests"))
+    #
+    (o/prin-sep)
+    (l/noten :o)))
+
+
+(comment import ./tests :prefix "")
+(comment import ./errors :prefix "")
+
+(comment import ./rewrite :prefix "")
+(comment import ./errors :prefix "")
+
+(comment import ./jipper :prefix "")
+(comment import ./helpers :prefix "")
+# based on code by corasaurus-hex
+
+# `slice` doesn't necessarily preserve the input type
+
+# XXX: differs from clojure's behavior
+#      e.g. (butlast [:a]) would yield nil(?!) in clojure
+(defn j/h/butlast
+  [indexed]
+  (if (empty? indexed)
+    nil
+    (if (tuple? indexed)
+      (tuple/slice indexed 0 -2)
+      (array/slice indexed 0 -2))))
+
+(comment
+
+  (j/h/butlast @[:a :b :c])
+  # =>
+  @[:a :b]
+
+  (j/h/butlast [:a])
+  # =>
+  []
+
+  )
+
+(defn j/h/rest
+  [indexed]
+  (if (empty? indexed)
+    nil
+    (if (tuple? indexed)
+      (tuple/slice indexed 1 -1)
+      (array/slice indexed 1 -1))))
+
+(comment
+
+  (j/h/rest [:a :b :c])
+  # =>
+  [:b :c]
+
+  (j/h/rest @[:a])
+  # =>
+  @[]
+
+  )
+
+# XXX: can pass in array - will get back tuple
+(defn j/h/tuple-push
+  [tup x & xs]
+  (if tup
+    [;tup x ;xs]
+    [x ;xs]))
+
+(comment
+
+  (j/h/tuple-push [:a :b] :c)
+  # =>
+  [:a :b :c]
+
+  (j/h/tuple-push nil :a)
+  # =>
+  [:a]
+
+  (j/h/tuple-push @[] :a)
+  # =>
+  [:a]
+
+  )
+
+(defn j/h/to-entries
+  [val]
+  (if (dictionary? val)
+    (pairs val)
+    val))
+
+(comment
+
+  (sort (j/h/to-entries {:a 1 :b 2}))
+  # =>
+  @[[:a 1] [:b 2]]
+
+  (j/h/to-entries {})
+  # =>
+  @[]
+
+  (j/h/to-entries @{:a 1})
+  # =>
+  @[[:a 1]]
+
+  # XXX: leaving non-dictionaries alone and passing through...
+  #      is this desirable over erroring?
+  (j/h/to-entries [:a :b :c])
+  # =>
+  [:a :b :c]
+
+  )
+
+# XXX: when xs is empty, "all" becomes nil
+(defn j/h/first-rest-maybe-all
+  [xs]
+  (if (or (nil? xs) (empty? xs))
+    [nil nil nil]
+    [(first xs) (j/h/rest xs) xs]))
+
+(comment
+
+  (j/h/first-rest-maybe-all [:a :b])
+  # =>
+  [:a [:b] [:a :b]]
+
+  (j/h/first-rest-maybe-all @[:a])
+  # =>
+  [:a @[] @[:a]]
+
+  (j/h/first-rest-maybe-all [])
+  # =>
+  [nil nil nil]
+
+  # XXX: is this what we want?
+  (j/h/first-rest-maybe-all nil)
+  # =>
+  [nil nil nil]
+
+  )
+
+
+(comment import ./locations :prefix "")
+# bl - begin line
+# bc - begin column
+# bp - begin position
+# el - end line
+# ec - end column
+# ep - end position
+(defn j/l/make-attrs
+  [& items]
+  (zipcoll [:bl :bc :bp :el :ec :ep]
+           items))
+
+(defn j/l/atom-node
+  [node-type peg-form]
+  ~(cmt (capture (sequence (line) (column) (position)
+                           ,peg-form
+                           (line) (column) (position)))
+        ,|[node-type (j/l/make-attrs ;(slice $& 0 -2)) (last $&)]))
+
+(defn j/l/reader-macro-node
+  [node-type sigil]
+  ~(cmt (capture (sequence (line) (column) (position)
+                           ,sigil
+                           (any :non-form)
+                           :form
+                           (line) (column) (position)))
+        ,|[node-type (j/l/make-attrs ;(slice $& 0 3) ;(slice $& -5 -2))
+           ;(slice $& 3 -5)]))
+
+(defn j/l/collection-node
+  [node-type open-delim close-delim]
+  ~(cmt
+     (capture
+       (sequence
+         (line) (column) (position)
+         ,open-delim
+         (any :input)
+         (choice ,close-delim
+                 (error
+                   (replace (sequence (line) (column) (position))
+                            ,|(string/format
+                                (string "line: %p column: %p position: %p "
+                                        "missing %p for %p")
+                                $0 $1 $2 close-delim node-type))))
+         (line) (column) (position)))
+     ,|[node-type (j/l/make-attrs ;(slice $& 0 3) ;(slice $& -5 -2))
+        ;(slice $& 3 -5)]))
+
+(def j/l/loc-grammar
+  ~@{:main (sequence (line) (column) (position)
+                     (some :input)
+                     (line) (column) (position))
+     #
+     :input (choice :non-form
+                    :form)
+     #
+     :non-form (choice :whitespace
+                       :comment)
+     #
+     :whitespace ,(j/l/atom-node :whitespace
+                             '(choice (some (set " \0\f\t\v"))
+                                      (choice "\r\n"
+                                              "\r"
+                                              "\n")))
+     # :whitespace
+     # (cmt (capture (sequence (line) (column)
+     #                         (choice (some (set " \0\f\t\v"))
+     #                                 (choice "\r\n"
+     #                                         "\r"
+     #                                         "\n"))
+     #                         (line) (column)))
+     #      ,|[:whitespace (make-attrs ;(slice $& 0 -2)) (last $&)])
+     #
+     :comment ,(j/l/atom-node :comment
+                          '(sequence "#"
+                                     (any (if-not (set "\r\n") 1))))
+     #
+     :form (choice # reader macros
+                   :fn
+                   :quasiquote
+                   :quote
+                   :splice
+                   :unquote
+                   # collections
+                   :array
+                   :bracket-array
+                   :tuple
+                   :bracket-tuple
+                   :table
+                   :struct
+                   # atoms
+                   :number
+                   :constant
+                   :buffer
+                   :string
+                   :long-buffer
+                   :long-string
+                   :keyword
+                   :symbol)
+     #
+     :fn ,(j/l/reader-macro-node :fn "|")
+     # :fn (cmt (capture (sequence (line) (column)
+     #                             "|"
+     #                             (any :non-form)
+     #                             :form
+     #                             (line) (column)))
+     #          ,|[:fn (make-attrs ;(slice $& 0 2) ;(slice $& -4 -2))
+     #             ;(slice $& 2 -4)])
+     #
+     :quasiquote ,(j/l/reader-macro-node :quasiquote "~")
+     #
+     :quote ,(j/l/reader-macro-node :quote "'")
+     #
+     :splice ,(j/l/reader-macro-node :splice ";")
+     #
+     :unquote ,(j/l/reader-macro-node :unquote ",")
+     #
+     :array ,(j/l/collection-node :array "@(" ")")
+     # :array
+     # (cmt
+     #   (capture
+     #     (sequence
+     #       (line) (column)
+     #       "@("
+     #       (any :input)
+     #       (choice ")"
+     #               (error
+     #                 (replace (sequence (line) (column))
+     #                          ,|(string/format
+     #                              "line: %p column: %p missing %p for %p"
+     #                              $0 $1 ")" :array))))
+     #       (line) (column)))
+     #   ,|[:array (make-attrs ;(slice $& 0 2) ;(slice $& -4 -2))
+     #      ;(slice $& 2 -4)])
+     #
+     :tuple ,(j/l/collection-node :tuple "(" ")")
+     #
+     :bracket-array ,(j/l/collection-node :bracket-array "@[" "]")
+     #
+     :bracket-tuple ,(j/l/collection-node :bracket-tuple "[" "]")
+     #
+     :table ,(j/l/collection-node :table "@{" "}")
+     #
+     :struct ,(j/l/collection-node :struct "{" "}")
+     #
+     :number ,(j/l/atom-node :number
+                         ~(drop (sequence (cmt (capture (some :num-char))
+                                               ,scan-number)
+                                          (opt (sequence ":" (range "AZ" "az"))))))
+     #
+     :num-char (choice (range "09" "AZ" "az")
+                       (set "&+-._"))
+     #
+     :constant ,(j/l/atom-node :constant
+                           '(sequence (choice "false" "nil" "true")
+                                      (not :name-char)))
+     #
+     :name-char (choice (range "09" "AZ" "az" "\x80\xFF")
+                        (set "!$%&*+-./:<?=>@^_"))
+     #
+     :buffer ,(j/l/atom-node :buffer
+                         '(sequence `@"`
+                                    (any (choice :escape
+                                                 (if-not "\"" 1)))
+                                    `"`))
+     #
+     :escape (sequence "\\"
+                       (choice (set `"'0?\abefnrtvz`)
+                               (sequence "x" (2 :h))
+                               (sequence "u" (4 :h))
+                               (sequence "U" (6 :h))
+                               (error (constant "bad escape"))))
+     #
+     :string ,(j/l/atom-node :string
+                         '(sequence `"`
+                                    (any (choice :escape
+                                                 (if-not "\"" 1)))
+                                    `"`))
+     #
+     :long-string ,(j/l/atom-node :long-string
+                              :long-bytes)
+     #
+     :long-bytes {:main (drop (sequence :open
+                                        (any (if-not :close 1))
+                                        :close))
+                  :open (capture :delim :n)
+                  :delim (some "`")
+                  :close (cmt (sequence (not (look -1 "`"))
+                                        (backref :n)
+                                        (capture (backmatch :n)))
+                              ,=)}
+     #
+     :long-buffer ,(j/l/atom-node :long-buffer
+                              '(sequence "@" :long-bytes))
+     #
+     :keyword ,(j/l/atom-node :keyword
+                          '(sequence ":"
+                                     (any :name-char)))
+     #
+     :symbol ,(j/l/atom-node :symbol
+                         '(some :name-char))
+     })
+
+(comment
+
+  (get (peg/match j/l/loc-grammar " ") 3)
+  # =>
+  [:whitespace @{:bl 1 :el 1 :bc 1 :bp 0 :ec 2 :ep 1} " "]
+
+  (get (peg/match j/l/loc-grammar "true?") 3)
+  # =>
+  [:symbol @{:bl 1 :el 1 :bc 1 :bp 0 :ec 6 :ep 5} "true?"]
+
+  (get (peg/match j/l/loc-grammar "nil?") 3)
+  # =>
+  [:symbol @{:bl 1 :el 1 :bc 1 :bp 0 :ec 5 :ep 4} "nil?"]
+
+  (get (peg/match j/l/loc-grammar "false?") 3)
+  # =>
+  [:symbol @{:bl 1 :el 1 :bc 1 :bp 0 :ec 7 :ep 6} "false?"]
+
+  (get (peg/match j/l/loc-grammar "# hi there") 3)
+  # =>
+  [:comment @{:bl 1 :el 1 :bc 1 :bp 0 :ec 11 :ep 10} "# hi there"]
+
+  (get (peg/match j/l/loc-grammar "1_000_000") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :bp 0 :ec 10 :ep 9} "1_000_000"]
+
+  (get (peg/match j/l/loc-grammar "8.3") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :bp 0 :ec 4 :ep 3} "8.3"]
+
+  (get (peg/match j/l/loc-grammar "1e2") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 3 :bp 0 :ec 4} "1e2"]
+
+  (get (peg/match j/l/loc-grammar "0xfe") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 4 :bp 0 :ec 5} "0xfe"]
+
+  (get (peg/match j/l/loc-grammar "2r01") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 4 :bp 0 :ec 5} "2r01"]
+
+  (get (peg/match j/l/loc-grammar "3r101&01") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 8 :bp 0 :ec 9} "3r101&01"]
+
+  (get (peg/match j/l/loc-grammar "2:u") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 3 :bp 0 :ec 4} "2:u"]
+
+  (get (peg/match j/l/loc-grammar "-8:s") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 4 :bp 0 :ec 5} "-8:s"]
+
+  (get (peg/match j/l/loc-grammar "1e2:n") 3)
+  # =>
+  [:number @{:bl 1 :el 1 :bc 1 :ep 5 :bp 0 :ec 6} "1e2:n"]
+
+  (get (peg/match j/l/loc-grammar "printf") 3)
+  # =>
+  [:symbol @{:bl 1 :el 1 :bc 1 :ep 6 :bp 0 :ec 7} "printf"]
+
+  (get (peg/match j/l/loc-grammar ":smile") 3)
+  # =>
+  [:keyword @{:bl 1 :el 1 :bc 1 :ep 6 :bp 0 :ec 7} ":smile"]
+
+  (get (peg/match j/l/loc-grammar `"fun"`) 3)
+  # =>
+  [:string @{:bl 1 :el 1 :bc 1 :ep 5 :bp 0 :ec 6} "\"fun\""]
+
+  (get (peg/match j/l/loc-grammar "``long-fun``") 3)
+  # =>
+  [:long-string @{:bl 1 :el 1 :bc 1 :ep 12 :bp 0 :ec 13} "``long-fun``"]
+
+  (get (peg/match j/l/loc-grammar "@``long-buffer-fun``") 3)
+  # =>
+  [:long-buffer
+   @{:bl 1 :el 1 :bc 1 :bp 0 :ec 21 :ep 20}
+   "@``long-buffer-fun``"]
+
+  (get (peg/match j/l/loc-grammar `@"a buffer"`) 3)
+  # =>
+  [:buffer @{:bl 1 :el 1 :bc 1 :ep 11 :bp 0 :ec 12} "@\"a buffer\""]
+
+  (get (peg/match j/l/loc-grammar "@[8]") 3)
+  # =>
+  [:bracket-array @{:bl 1 :el 1 :bc 1 :ep 4 :bp 0 :ec 5}
+   [:number @{:bl 1 :el 1 :bc 3 :ep 3 :bp 2 :ec 4} "8"]]
+
+  (get (peg/match j/l/loc-grammar "@{:a 1}") 3)
+  # =>
+  [:table @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+   [:keyword @{:bl 1 :el 1 :bc 3 :ep 4 :bp 2 :ec 5} ":a"]
+   [:whitespace @{:bl 1 :el 1 :bc 5 :ep 5 :bp 4 :ec 6} " "]
+   [:number @{:bl 1 :el 1 :bc 6 :ep 6 :bp 5 :ec 7} "1"]]
+
+  (get (peg/match j/l/loc-grammar "~x") 3)
+  # =>
+  [:quasiquote @{:bl 1 :el 1 :bc 1 :ep 2 :bp 0 :ec 3}
+   [:symbol @{:bl 1 :el 1 :bc 2 :ep 2 :bp 1 :ec 3} "x"]]
+
+  (get (peg/match j/l/loc-grammar "' '[:a :b]") 3)
+  # =>
+  [:quote @{:bl 1 :el 1 :bc 1 :ep 10 :bp 0 :ec 11}
+   [:whitespace @{:bl 1 :el 1 :bc 2 :ep 2 :bp 1 :ec 3} " "]
+   [:quote @{:bl 1 :el 1 :bc 3 :ep 10 :bp 2 :ec 11}
+    [:bracket-tuple @{:bl 1 :el 1 :bc 4 :ep 10 :bp 3 :ec 11}
+     [:keyword @{:bl 1 :el 1 :bc 5 :ep 6 :bp 4 :ec 7} ":a"]
+     [:whitespace @{:bl 1 :el 1 :bc 7 :ep 7 :bp 6 :ec 8} " "]
+     [:keyword @{:bl 1 :el 1 :bc 8 :ep 9 :bp 7 :ec 10} ":b"]]]]
+
+  )
+
+(def j/l/loc-top-level-ast
+  (put (table ;(kvs j/l/loc-grammar))
+       :main ~(sequence (line) (column) (position)
+                        :input
+                        (line) (column) (position))))
+
+(defn j/l/par
+  [src &opt start single]
+  (default start 0)
+  (if single
+    (if-let [[bl bc bp tree el ec ep]
+             (peg/match j/l/loc-top-level-ast src start)]
+      @[:code (j/l/make-attrs bl bc bp el ec ep) tree]
+      @[:code])
+    (if-let [captures (peg/match j/l/loc-grammar src start)]
+      (let [[bl bc bp] (slice captures 0 3)
+            [el ec ep] (slice captures -4)
+            trees (array/slice captures 3 -4)]
+        (array/insert trees 0
+                      :code (j/l/make-attrs bl bc bp el ec ep)))
+      @[:code])))
+
+# XXX: backward compatibility
+(def j/l/ast j/l/par)
+
+(comment
+
+  (j/l/par "(+ 1 1)")
+  # =>
+  @[:code @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+    [:tuple @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+     [:symbol @{:bl 1 :el 1 :bc 2 :ep 2 :bp 1 :ec 3} "+"]
+     [:whitespace @{:bl 1 :el 1 :bc 3 :ep 3 :bp 2 :ec 4} " "]
+     [:number @{:bl 1 :el 1 :bc 4 :ep 4 :bp 3 :ec 5} "1"]
+     [:whitespace @{:bl 1 :el 1 :bc 5 :ep 5 :bp 4 :ec 6} " "]
+     [:number @{:bl 1 :el 1 :bc 6 :ep 6 :bp 5 :ec 7} "1"]]]
+
+  )
+
+(defn j/l/gen*
+  [an-ast buf]
+  (case (first an-ast)
+    :code
+    (each elt (drop 2 an-ast)
+      (j/l/gen* elt buf))
+    #
+    :buffer
+    (buffer/push-string buf (in an-ast 2))
+    :comment
+    (buffer/push-string buf (in an-ast 2))
+    :constant
+    (buffer/push-string buf (in an-ast 2))
+    :keyword
+    (buffer/push-string buf (in an-ast 2))
+    :long-buffer
+    (buffer/push-string buf (in an-ast 2))
+    :long-string
+    (buffer/push-string buf (in an-ast 2))
+    :number
+    (buffer/push-string buf (in an-ast 2))
+    :string
+    (buffer/push-string buf (in an-ast 2))
+    :symbol
+    (buffer/push-string buf (in an-ast 2))
+    :whitespace
+    (buffer/push-string buf (in an-ast 2))
+    #
+    :array
+    (do
+      (buffer/push-string buf "@(")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf))
+      (buffer/push-string buf ")"))
+    :bracket-array
+    (do
+      (buffer/push-string buf "@[")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf))
+      (buffer/push-string buf "]"))
+    :bracket-tuple
+    (do
+      (buffer/push-string buf "[")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf))
+      (buffer/push-string buf "]"))
+    :tuple
+    (do
+      (buffer/push-string buf "(")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf))
+      (buffer/push-string buf ")"))
+    :struct
+    (do
+      (buffer/push-string buf "{")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf))
+      (buffer/push-string buf "}"))
+    :table
+    (do
+      (buffer/push-string buf "@{")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf))
+      (buffer/push-string buf "}"))
+    #
+    :fn
+    (do
+      (buffer/push-string buf "|")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf)))
+    :quasiquote
+    (do
+      (buffer/push-string buf "~")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf)))
+    :quote
+    (do
+      (buffer/push-string buf "'")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf)))
+    :splice
+    (do
+      (buffer/push-string buf ";")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf)))
+    :unquote
+    (do
+      (buffer/push-string buf ",")
+      (each elt (drop 2 an-ast)
+        (j/l/gen* elt buf)))
+    ))
+
+(defn j/l/gen
+  [an-ast]
+  (let [buf @""]
+    (j/l/gen* an-ast buf)
+    # XXX: leave as buffer?
+    (string buf)))
+
+# XXX: backward compatibility
+(def j/l/code j/l/gen)
+
+(comment
+
+  (j/l/gen [:code])
+  # =>
+  ""
+
+  (j/l/gen [:whitespace @{:bc 1 :bl 1 :bp 0
+                      :ec 2 :el 1 :ep 1} " "])
+  # =>
+  " "
+
+  (j/l/gen [:buffer @{:bc 1 :bl 1 :bp 0
+                  :ec 12 :el 1 :ep 11} "@\"a buffer\""])
+  # =>
+  `@"a buffer"`
+
+  (j/l/gen @[:code @{:bc 1 :bl 1 :bp 0
+                 :ec 8 :el 1 :ep 7}
+         [:tuple @{:bc 1 :bl 1 :bp 0
+                   :ec 8 :el 1 :ep 7}
+                 [:symbol @{:bc 2 :bl 1 :bp 1
+                            :ec 3 :el 1 :ep 2} "+"]
+                 [:whitespace @{:bc 3 :bl 1 :bp 2
+                                :ec 4 :el 1 :ep 3} " "]
+                 [:number @{:bc 4 :bl 1 :bp 3
+                            :ec 5 :el 1 :ep 4} "1"]
+                 [:whitespace @{:bc 5 :bl 1 :bp 4
+                                :ec 6 :el 1 :ep 5} " "]
+                 [:number @{:bc 6 :bl 1 :bp 5
+                            :ec 7 :el 1 :ep 6} "1"]]])
+  # =>
+  "(+ 1 1)"
+
+  )
+
+(comment
+
+  (def src "{:x  :y \n :z  [:a  :b    :c]}")
+
+  (j/l/gen (j/l/par src))
+  # =>
+  src
+
+  )
+
+(comment
+
+  (comment
+
+    (let [src (slurp (string (os/getenv "HOME")
+                             "/src/janet/src/boot/boot.janet"))]
+      (= (string src)
+         (j/l/gen (j/l/par src))))
+
+    )
+
+  )
+
+
+(def j/version "2026-03-20_08-37-15")
+
+# exports
+(def j/par j/l/par)
+(def j/gen j/l/gen)
+
+########################################################################
+
+(defn j/zipper
+  ``
+  Returns a new zipper consisting of two elements:
+
+  * `a-root` - the passed in root node.
+  * `state` - table of info about node's z-location in the tree with keys:
+    * `:ls` - left siblings
+    * `:pnodes` - path of nodes from root to current z-location
+    * `:pstate` - parent node's state
+    * `:rs` - right siblings
+    * `:changed?` - indicates whether "editing" has occured
+
+  `state` has a prototype table with four functions:
+
+  * :branch? - fn that tests if a node is a branch (has children)
+  * :children - fn that returns the child nodes for the given branch.
+  * :make-node - fn that takes a node + children and returns a new branch
+    node with the same.
+  * :make-state - fn for creating a new state
+  ``
+  [a-root branch?-fn children-fn make-node-fn]
+  #
+  (defn make-state_
+    [&opt ls_ rs_ pnodes_ pstate_ changed?_]
+    (table/setproto @{:ls ls_
+                      :pnodes pnodes_
+                      :pstate pstate_
+                      :rs rs_
+                      :changed? changed?_}
+                    @{:branch? branch?-fn
+                      :children children-fn
+                      :make-node make-node-fn
+                      :make-state make-state_}))
+  #
+  [a-root (make-state_)])
+
+(comment
+
+  # XXX
+
+  )
+
+(defn j/indexed-zip
+  ``
+  Returns a zipper for nested indexed data structures (tuples
+  or arrays), given a root data structure.
+  ``
+  [indexed]
+  (j/zipper indexed
+          indexed?
+          j/h/to-entries
+          (fn [_p xs] xs)))
+
+(comment
+
+  (def a-node
+    [:x [:y :z]])
+
+  (def [the-node the-state]
+    (j/indexed-zip a-node))
+
+  the-node
+  # =>
+  a-node
+
+  # merge is used to "remove" the prototype table of `st`
+  (merge {} the-state)
+  # =>
+  @{}
+
+  )
+
+(defn j/node
+  "Returns the node at `zloc`."
+  [zloc]
+  (get zloc 0))
+
+(comment
+
+  (j/node (j/indexed-zip [:a :b [:x :y]]))
+  # =>
+  [:a :b [:x :y]]
+
+  )
+
+(defn j/state
+  "Returns the state for `zloc`."
+  [zloc]
+  (get zloc 1))
+
+(comment
+
+  # merge is used to "remove" the prototype table of `st`
+  (merge {}
+         (-> (j/indexed-zip [:a [:b [:x :y]]])
+             j/state))
+  # =>
+  @{}
+
+  )
+
+(defn j/branch?
+  ``
+  Returns true if the node at `zloc` is a branch.
+  Returns false otherwise.
+  ``
+  [zloc]
+  (((j/state zloc) :branch?) (j/node zloc)))
+
+(comment
+
+  (j/branch? (j/indexed-zip [:a :b [:x :y]]))
+  # =>
+  true
+
+  )
+
+(defn j/children
+  ``
+  Returns children for a branch node at `zloc`.
+  Otherwise throws an error.
+  ``
+  [zloc]
+  (if (j/branch? zloc)
+    (((j/state zloc) :children) (j/node zloc))
+    (error "Called `children` on a non-branch zloc")))
+
+(comment
+
+  (j/children (j/indexed-zip [:a :b [:x :y]]))
+  # =>
+  [:a :b [:x :y]]
+
+  )
+
+(defn j/make-state
+  ``
+  Convenience function for calling the :make-state function for `zloc`.
+  ``
+  [zloc &opt ls rs pnodes pstate changed?]
+  (((j/state zloc) :make-state) ls rs pnodes pstate changed?))
+
+(comment
+
+  # merge is used to "remove" the prototype table of `st`
+  (merge {}
+         (j/make-state (j/indexed-zip [:a :b [:x :y]])))
+  # =>
+  @{}
+
+  )
+
+(defn j/down
+  ``
+  Moves down the tree, returning the leftmost child z-location of
+  `zloc`, or nil if there are no children.
+  ``
+  [zloc]
+  (when (j/branch? zloc)
+    (let [[z-node st] zloc
+          [k rest-kids kids]
+          (j/h/first-rest-maybe-all (j/children zloc))]
+      (when kids
+        [k
+         (j/make-state zloc
+                     []
+                     rest-kids
+                     (if (not (empty? st))
+                       (j/h/tuple-push (get st :pnodes) z-node)
+                       [z-node])
+                     st
+                     (get st :changed?))]))))
+
+(comment
+
+  (j/node (j/down (j/indexed-zip [:a :b [:x :y]])))
+  # =>
+  :a
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/branch?)
+  # =>
+  false
+
+  (try
+    (-> (j/indexed-zip [:a])
+        j/down
+        j/children)
+    ([e] e))
+  # =>
+  "Called `children` on a non-branch zloc"
+
+  (deep=
+    #
+    (merge {}
+           (-> [:a [:b [:x :y]]]
+               j/indexed-zip
+               j/down
+               j/state))
+    #
+    '@{:ls ()
+       :pnodes ((:a (:b (:x :y))))
+       :pstate @{}
+       :rs ((:b (:x :y)))})
+  # =>
+  true
+
+  )
+
+(defn j/right
+  ``
+  Returns the z-location of the right sibling of the node
+  at `zloc`, or nil if there is no such sibling.
+  ``
+  [zloc]
+  (let [[z-node st] zloc
+        {:ls ls :rs rs} st
+        [r rest-rs rs_] (j/h/first-rest-maybe-all rs)]
+    (when (and (not (empty? st)) rs_)
+      [r
+       (j/make-state zloc
+                   (j/h/tuple-push ls z-node)
+                   rest-rs
+                   (get st :pnodes)
+                   (get st :pstate)
+                   (get st :changed?))])))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b])
+      j/down
+      j/right
+      j/node)
+  # =>
+  :b
+
+  (-> (j/indexed-zip [:a])
+      j/down
+      j/right)
+  # =>
+  nil
+
+  )
+
+(defn j/make-node
+  ``
+  Returns a branch node, given `zloc`, `a-node` and `kids`.
+  ``
+  [zloc a-node kids]
+  (((j/state zloc) :make-node) a-node kids))
+
+(comment
+
+  (j/make-node (j/indexed-zip [:a :b [:x :y]])
+             [:a :b] [:x :y])
+  # =>
+  [:x :y]
+
+  )
+
+(defn j/up
+  ``
+  Moves up the tree, returning the parent z-location of `zloc`,
+  or nil if at the root z-location.
+  ``
+  [zloc]
+  (let [[z-node st] zloc
+        {:ls ls
+         :pnodes pnodes
+         :pstate pstate
+         :rs rs
+         :changed? changed?} st]
+    (when pnodes
+      (let [pnode (last pnodes)]
+        (if changed?
+          [(j/make-node zloc pnode [;ls z-node ;rs])
+           (j/make-state zloc
+                       (get pstate :ls)
+                       (get pstate :rs)
+                       (get pstate :pnodes)
+                       (get pstate :pstate)
+                       true)]
+          [pnode pstate])))))
+
+(comment
+
+  (def m-zip
+    (j/indexed-zip [:a :b [:x :y]]))
+
+  (deep=
+    (-> m-zip
+        j/down
+        j/up)
+    m-zip)
+  # =>
+  true
+
+  (deep=
+    (-> m-zip
+        j/down
+        j/right
+        j/right
+        j/down
+        j/up
+        j/up)
+    m-zip)
+  # =>
+  true
+
+  )
+
+# XXX: used by `root` and `df-next`
+(defn j/end?
+  "Returns true if `zloc` represents the end of a depth-first walk."
+  [zloc]
+  (= :end (j/state zloc)))
+
+(defn j/root
+  ``
+  Moves all the way up the tree for `zloc` and returns the node at
+  the root z-location.
+  ``
+  [zloc]
+  (if (j/end? zloc)
+    (j/node zloc)
+    (if-let [p (j/up zloc)]
+      (j/root p)
+      (j/node zloc))))
+
+(comment
+
+  (def a-zip
+    (j/indexed-zip [:a :b [:x :y]]))
+
+  (j/node a-zip)
+  # =>
+  (-> a-zip
+      j/down
+      j/right
+      j/right
+      j/down
+      j/root)
+
+  )
+
+(defn j/df-next
+  ``
+  Moves to the next z-location, depth-first.  When the end is
+  reached, returns a special z-location detectable via `end?`.
+  Does not move if already at the end.
+  ``
+  [zloc]
+  #
+  (defn recur
+    [a-loc]
+    (if (j/up a-loc)
+      (or (j/right (j/up a-loc))
+          (recur (j/up a-loc)))
+      [(j/node a-loc) :end]))
+  #
+  (if (j/end? zloc)
+    zloc
+    (or (and (j/branch? zloc) (j/down zloc))
+        (j/right zloc)
+        (recur zloc))))
+
+(comment
+
+  (def a-zip
+    (j/indexed-zip [:a :b [:x]]))
+
+  (j/node (j/df-next a-zip))
+  # =>
+  :a
+
+  (-> a-zip
+      j/df-next
+      j/df-next
+      j/node)
+  # =>
+  :b
+
+  (-> a-zip
+      j/df-next
+      j/df-next
+      j/df-next
+      j/df-next
+      j/df-next
+      j/end?)
+  # =>
+  true
+
+  )
+
+(defn j/replace
+  "Replaces existing node at `zloc` with `a-node`, without moving."
+  [zloc a-node]
+  (let [[_ st] zloc]
+    [a-node
+     (j/make-state zloc
+                 (get st :ls)
+                 (get st :rs)
+                 (get st :pnodes)
+                 (get st :pstate)
+                 true)]))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      (j/replace :w)
+      j/root)
+  # =>
+  [:w :b [:x :y]]
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/right
+      j/down
+      (j/replace :w)
+      j/root)
+  # =>
+  [:a :b [:w :y]]
+
+  )
+
+(defn j/edit
+  ``
+  Replaces the node at `zloc` with the value of `(f node args)`,
+  where `node` is the node associated with `zloc`.
+  ``
+  [zloc f & args]
+  (j/replace zloc
+           (apply f (j/node zloc) args)))
+
+(comment
+
+  (-> (j/indexed-zip [1 2 [8 9]])
+      j/down
+      (j/edit inc)
+      j/root)
+  # =>
+  [2 2 [8 9]]
+
+  (-> (j/indexed-zip [1 2 [8 9]])
+      j/down
+      (j/edit inc)
+      j/right
+      (j/edit inc)
+      j/right
+      j/down
+      (j/edit dec)
+      j/right
+      (j/edit dec)
+      j/root)
+  # =>
+  [2 3 [7 8]]
+
+  )
+
+(defn j/insert-child
+  ``
+  Inserts `child` as the leftmost child of the node at `zloc`,
+  without moving.
+  ``
+  [zloc child]
+  (j/replace zloc
+           (j/make-node zloc
+                      (j/node zloc)
+                      [child ;(j/children zloc)])))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      (j/insert-child :c)
+      j/root)
+  # =>
+  [:c :a :b [:x :y]]
+
+  )
+
+(defn j/append-child
+  ``
+  Appends `child` as the rightmost child of the node at `zloc`,
+  without moving.
+  ``
+  [zloc child]
+  (j/replace zloc
+           (j/make-node zloc
+                      (j/node zloc)
+                      [;(j/children zloc) child])))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      (j/append-child :c)
+      j/root)
+  # =>
+  [:a :b [:x :y] :c]
+
+  )
+
+(defn j/rightmost
+  ``
+  Returns the z-location of the rightmost sibling of the node at
+  `zloc`, or the current node's z-location if there are none to the
+  right.
+  ``
+  [zloc]
+  (let [[z-node st] zloc
+        {:ls ls :rs rs} st]
+    (if (and (not (empty? st))
+             (indexed? rs)
+             (not (empty? rs)))
+      [(last rs)
+       (j/make-state zloc
+                   (j/h/tuple-push ls z-node ;(j/h/butlast rs))
+                   []
+                   (get st :pnodes)
+                   (get st :pstate)
+                   (get st :changed?))]
+      zloc)))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/rightmost
+      j/node)
+  # =>
+  [:x :y]
+
+  )
+
+(defn j/remove
+  ``
+  Removes the node at `zloc`, returning the z-location that would have
+  preceded it in a depth-first walk.  Throws an error if called at the
+  root z-location.
+  ``
+  [zloc]
+  (let [[_z-node st] zloc
+        {:ls ls
+         :pnodes pnodes
+         :pstate pstate
+         :rs rs} st]
+    #
+    (defn recur
+      [a-zloc]
+      (if-let [child (and (j/branch? a-zloc) (j/down a-zloc))]
+        (recur (j/rightmost child))
+        a-zloc))
+    #
+    (if (not (empty? st))
+      (if (pos? (length ls))
+        (recur [(last ls)
+                (j/make-state zloc
+                            (j/h/butlast ls)
+                            rs
+                            pnodes
+                            pstate
+                            true)])
+        [(j/make-node zloc (last pnodes) rs)
+         (j/make-state zloc
+                     (get pstate :ls)
+                     (get pstate :rs)
+                     (get pstate :pnodes)
+                     (get pstate :pstate)
+                     true)])
+      (error "Called `remove` at root"))))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/remove
+      j/node)
+  # =>
+  :a
+
+  (try
+    (j/remove (j/indexed-zip [:a :b [:x :y]]))
+    ([e] e))
+  # =>
+  "Called `remove` at root"
+
+  )
+
+(defn j/left
+  ``
+  Returns the z-location of the left sibling of the node
+  at `zloc`, or nil if there is no such sibling.
+  ``
+  [zloc]
+  (let [[z-node st] zloc
+        {:ls ls :rs rs} st]
+    (when (and (not (empty? st))
+               (indexed? ls)
+               (not (empty? ls)))
+      [(last ls)
+       (j/make-state zloc
+                   (j/h/butlast ls)
+                   [z-node ;rs]
+                   (get st :pnodes)
+                   (get st :pstate)
+                   (get st :changed?))])))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b :c])
+      j/down
+      j/right
+      j/right
+      j/left
+      j/node)
+  # =>
+  :b
+
+  (-> (j/indexed-zip [:a])
+      j/down
+      j/left)
+  # =>
+  nil
+
+  )
+
+(defn j/df-prev
+  ``
+  Moves to the previous z-location, depth-first.
+  If already at the root, returns nil.
+  ``
+  [zloc]
+  #
+  (defn recur
+    [a-zloc]
+    (if-let [child (and (j/branch? a-zloc)
+                        (j/down a-zloc))]
+      (recur (j/rightmost child))
+      a-zloc))
+  #
+  (if-let [left-loc (j/left zloc)]
+    (recur left-loc)
+    (j/up zloc)))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/df-prev
+      j/node)
+  # =>
+  :a
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/right
+      j/down
+      j/df-prev
+      j/node)
+  # =>
+  [:x :y]
+
+  )
+
+(defn j/insert-right
+  ``
+  Inserts `a-node` as the right sibling of the node at `zloc`,
+  without moving.
+  ``
+  [zloc a-node]
+  (let [[z-node st] zloc
+        {:ls ls :rs rs} st]
+    (if (not (empty? st))
+      [z-node
+       (j/make-state zloc
+                   ls
+                   [a-node ;rs]
+                   (get st :pnodes)
+                   (get st :pstate)
+                   true)]
+      (error "Called `insert-right` at root"))))
+
+(comment
+
+  (def a-zip
+    (j/indexed-zip [:a :b [:x :y]]))
+
+  (-> a-zip
+      j/down
+      (j/insert-right :z)
+      j/root)
+  # =>
+  [:a :z :b [:x :y]]
+
+  (try
+    (j/insert-right a-zip :e)
+    ([e] e))
+  # =>
+  "Called `insert-right` at root"
+
+  )
+
+(defn j/insert-left
+  ``
+  Inserts `a-node` as the left sibling of the node at `zloc`,
+  without moving.
+  ``
+  [zloc a-node]
+  (let [[z-node st] zloc
+        {:ls ls :rs rs} st]
+    (if (not (empty? st))
+      [z-node
+       (j/make-state zloc
+                   (j/h/tuple-push ls a-node)
+                   rs
+                   (get st :pnodes)
+                   (get st :pstate)
+                   true)]
+      (error "Called `insert-left` at root"))))
+
+(comment
+
+  (def a-zip
+    (j/indexed-zip [:a :b [:x :y]]))
+
+  (-> a-zip
+      j/down
+      (j/insert-left :z)
+      j/root)
+  # =>
+  [:z :a :b [:x :y]]
+
+  (try
+    (j/insert-left a-zip :e)
+    ([e] e))
+  # =>
+  "Called `insert-left` at root"
+
+  )
+
+(defn j/rights
+  "Returns siblings to the right of `zloc`."
+  [zloc]
+  (when-let [st (j/state zloc)]
+    (get st :rs)))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/rights)
+  # =>
+  [:b [:x :y]]
+
+  (-> (j/indexed-zip [:a :b])
+      j/down
+      j/right
+      j/rights)
+  # =>
+  []
+
+  )
+
+(defn j/lefts
+  "Returns siblings to the left of `zloc`."
+  [zloc]
+  (if-let [st (j/state zloc)
+           ls (get st :ls)]
+    ls
+    []))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b])
+      j/down
+      j/lefts)
+  # =>
+  []
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/right
+      j/lefts)
+  # =>
+  [:a :b]
+
+  )
+
+(defn j/leftmost
+  ``
+  Returns the z-location of the leftmost sibling of the node at `zloc`,
+  or the current node's z-location if there are no siblings to the left.
+  ``
+  [zloc]
+  (let [[z-node st] zloc
+        {:ls ls :rs rs} st]
+    (if (and (not (empty? st))
+             (indexed? ls)
+             (not (empty? ls)))
+      [(first ls)
+       (j/make-state zloc
+                   []
+                   [;(j/h/rest ls) z-node ;rs]
+                   (get st :pnodes)
+                   (get st :pstate)
+                   (get st :changed?))]
+      zloc)))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/leftmost
+      j/node)
+  # =>
+  :a
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/rightmost
+      j/leftmost
+      j/node)
+  # =>
+  :a
+
+  )
+
+(defn j/path
+  "Returns the path of nodes that lead to `zloc` from the root node."
+  [zloc]
+  (when-let [st (j/state zloc)]
+    (get st :pnodes)))
+
+(comment
+
+  (j/path (j/indexed-zip [:a :b [:x :y]]))
+  # =>
+  nil
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/path)
+  # =>
+  [[:a :b [:x :y]]]
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/right
+      j/down
+      j/path)
+  # =>
+  [[:a :b [:x :y]] [:x :y]]
+
+  )
+
+(defn j/right-until
+  ``
+  Try to move right from `zloc`, calling `pred` for each
+  right sibling.  If the `pred` call has a truthy result,
+  return the corresponding right sibling.
+  Otherwise, return nil.
+  ``
+  [zloc pred]
+  (when-let [right-sib (j/right zloc)]
+    (if (pred right-sib)
+      right-sib
+      (j/right-until right-sib pred))))
+
+(comment
+
+  (-> [:code
+       [:tuple
+        [:comment "# hi there"] [:whitespace "\n"]
+        [:symbol "+"] [:whitespace " "]
+        [:number "1"] [:whitespace " "]
+        [:number "2"]]]
+      j/indexed-zip
+      j/down
+      j/right
+      j/down
+      (j/right-until |(match (j/node $)
+                      [:comment]
+                      false
+                      #
+                      [:whitespace]
+                      false
+                      #
+                      true))
+      j/node)
+  # =>
+  [:symbol "+"]
+
+  )
+
+(defn j/left-until
+  ``
+  Try to move left from `zloc`, calling `pred` for each
+  left sibling.  If the `pred` call has a truthy result,
+  return the corresponding left sibling.
+  Otherwise, return nil.
+  ``
+  [zloc pred]
+  (when-let [left-sib (j/left zloc)]
+    (if (pred left-sib)
+      left-sib
+      (j/left-until left-sib pred))))
+
+(comment
+
+  (-> [:code
+       [:tuple
+        [:comment "# hi there"] [:whitespace "\n"]
+        [:symbol "+"] [:whitespace " "]
+        [:number "1"] [:whitespace " "]
+        [:number "2"]]]
+      j/indexed-zip
+      j/down
+      j/right
+      j/down
+      j/rightmost
+      (j/left-until |(match (j/node $)
+                     [:comment]
+                     false
+                     #
+                     [:whitespace]
+                     false
+                     #
+                     true))
+      j/node)
+  # =>
+  [:number "1"]
+
+  )
+
+(defn j/search-from
+  ``
+  Successively call `pred` on z-locations starting at `zloc`
+  in depth-first order.  If a call to `pred` returns a
+  truthy value, return the corresponding z-location.
+  Otherwise, return nil.
+  ``
+  [zloc pred]
+  (if (pred zloc)
+    zloc
+    (when-let [next-zloc (j/df-next zloc)]
+      (when (j/end? next-zloc)
+        (break nil))
+      (j/search-from next-zloc pred))))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b :c])
+      j/down
+      (j/search-from |(match (j/node $)
+                      :b
+                      true))
+      j/node)
+  # =>
+  :b
+
+  (-> (j/indexed-zip [:a :b :c])
+      j/down
+      (j/search-from |(match (j/node $)
+                      :d
+                      true)))
+  # =>
+  nil
+
+  (-> (j/indexed-zip [:a :b :c])
+      j/down
+      (j/search-from |(match (j/node $)
+                      :a
+                      true))
+      j/node)
+  # =>
+  :a
+
+  )
+
+(defn j/search-after
+  ``
+  Successively call `pred` on z-locations starting after
+  `zloc` in depth-first order.  If a call to `pred` returns a
+  truthy value, return the corresponding z-location.
+  Otherwise, return nil.
+  ``
+  [zloc pred]
+  (when (j/end? zloc)
+    (break nil))
+  (when-let [next-zloc (j/df-next zloc)]
+    (if (pred next-zloc)
+      next-zloc
+      (j/search-after next-zloc pred))))
+
+(comment
+
+  (-> (j/indexed-zip [:b :a :b])
+      j/down
+      (j/search-after |(match (j/node $)
+                       :b
+                       true))
+      j/left
+      j/node)
+  # =>
+  :a
+
+  (-> (j/indexed-zip [:b :a :b])
+      j/down
+      (j/search-after |(match (j/node $)
+                       :d
+                       true)))
+  # =>
+  nil
+
+  (-> (j/indexed-zip [:a [:b :c [2 [3 :smile] 5]]])
+      (j/search-after |(match (j/node $)
+                       [_ :smile]
+                       true))
+      j/down
+      j/node)
+  # =>
+  3
+
+  )
+
+(defn j/unwrap
+  ``
+  If the node at `zloc` is a branch node, "unwrap" its children in
+  place.  If `zloc`'s node is not a branch node, do nothing.
+
+  Throws an error if `zloc` corresponds to a top-most container.
+  ``
+  [zloc]
+  (unless (j/branch? zloc)
+    (break zloc))
+  #
+  (when (empty? (j/state zloc))
+    (error "Called `unwrap` at root"))
+  #
+  (def kids (j/children zloc))
+  (var i (dec (length kids)))
+  (var curr-zloc zloc)
+  (while (<= 0 i) # right to left
+    (set curr-zloc
+         (j/insert-right curr-zloc (get kids i)))
+    (-- i))
+  # try to end up at a sensible spot
+  (set curr-zloc
+       (j/remove curr-zloc))
+  (if-let [ret-zloc (j/right curr-zloc)]
+    ret-zloc
+    curr-zloc))
+
+(comment
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/right
+      j/right
+      j/unwrap
+      j/root)
+  # =>
+  [:a :b :x :y]
+
+  (-> (j/indexed-zip [:a :b [:x :y]])
+      j/down
+      j/unwrap
+      j/root)
+  # =>
+  [:a :b [:x :y]]
+
+  (-> (j/indexed-zip [[:a]])
+      j/down
+      j/unwrap
+      j/root)
+  # =>
+  [:a]
+
+  (-> (j/indexed-zip [[:a :b] [:x :y]])
+      j/down
+      j/down
+      j/remove
+      j/unwrap
+      j/root)
+  # =>
+  [:b [:x :y]]
+
+  (try
+    (-> (j/indexed-zip [:a :b [:x :y]])
+        j/unwrap)
+    ([e] e))
+  # =>
+  "Called `unwrap` at root"
+
+  )
+
+(defn j/eq?
+  ``
+  Compare two zlocs, `a-zloc` and `b-zloc`, for equality.
+  ``
+  [a-zloc b-zloc]
+  (and (= (length (j/lefts a-zloc)) (length (j/lefts b-zloc)))
+       (= (j/path a-zloc) (j/path b-zloc))))
+
+(comment
+
+  (def iz (j/indexed-zip [:a :b :c :b]))
+
+  (j/eq? (-> iz j/down j/right)
+       (-> iz j/down j/right j/right j/right))
+  # =>
+  false
+
+  (j/eq? (-> iz j/down j/right)
+       (-> iz j/down j/right j/right j/right j/left j/left))
+  # =>
+  true
+
+  )
+
+(defn j/wrap
+  ``
+  Replace nodes from `start-zloc` through `end-zloc` with a single
+  node of the same type as `wrap-node` containing the nodes from
+  `start-zloc` through `end-zloc`.
+
+  If `end-zloc` is not specified, just wrap `start-zloc`.
+
+  The caller is responsible for ensuring the value of `end-zloc`
+  is somewhere to the right of `start-zloc`.  Throws an error if
+  an inappropriate value is specified for `end-zloc`.
+  ``
+  [start-zloc wrap-node &opt end-zloc]
+  (default end-zloc start-zloc)
+  #
+  # 1. collect all nodes to wrap
+  #
+  (def kids @[])
+  (var cur-zloc start-zloc)
+  (while (and cur-zloc
+              (not (j/eq? cur-zloc end-zloc))) # left to right
+    (array/push kids (j/node cur-zloc))
+    (set cur-zloc (j/right cur-zloc)))
+  (when (nil? cur-zloc)
+    (error "Called `wrap` with invalid value for `end-zloc`."))
+  # also collect the last node
+  (array/push kids (j/node end-zloc))
+  #
+  # 2. replace locations that will be removed with non-container nodes
+  #
+  (def dummy-node
+    (j/make-node start-zloc wrap-node (tuple)))
+  (set cur-zloc start-zloc)
+  # trying to do this together in step 1 is not straight-forward
+  # because the desired exiting condition for the while loop depends
+  # on cur-zloc becoming end-zloc -- if `replace` were to be used
+  # there, the termination condition never gets fulfilled properly.
+  (repeat (dec (length kids)) # left to right again
+    (set cur-zloc
+         (-> (j/replace cur-zloc dummy-node)
+             j/right)))
+  (set cur-zloc
+       (j/replace cur-zloc dummy-node))
+  #
+  # 3. remove all relevant locations
+  #
+  (def new-node
+    (j/make-node start-zloc wrap-node (tuple ;kids)))
+  (repeat (dec (length kids)) # right to left
+    (set cur-zloc
+         (j/remove cur-zloc)))
+  # 4. put the new container node into place
+  (j/replace cur-zloc new-node))
+
+(comment
+
+  (def start-zloc
+    (-> (j/indexed-zip [:a [:b] :c :x])
+        j/down
+        j/right))
+
+  (j/node start-zloc)
+  # =>
+  [:b]
+
+  (-> (j/wrap start-zloc [])
+      j/root)
+  # =>
+  [:a [[:b]] :c :x]
+
+  (def end-zloc
+    (j/right start-zloc))
+
+  (j/node end-zloc)
+  # =>
+  :c
+
+  (-> (j/wrap start-zloc [] end-zloc)
+      j/root)
+  # =>
+  [:a [[:b] :c] :x]
+
+  (try
+    (-> (j/wrap end-zloc [] start-zloc)
+        j/root)
+    ([e] e))
+  # =>
+  "Called `wrap` with invalid value for `end-zloc`."
+
+  )
+
+########################################################################
+
+(defn j/has-children?
+  ``
+  Returns true if `a-node` can have children.
+  Returns false if `a-node` cannot have children.
+  ``
+  [a-node]
+  (when-let [[head] a-node]
+    (truthy? (get {:code true
+                   :fn true
+                   :quasiquote true
+                   :quote true
+                   :splice true
+                   :unquote true
+                   :array true
+                   :tuple true
+                   :bracket-array true
+                   :bracket-tuple true
+                   :table true
+                   :struct true}
+                  head))))
+
+(comment
+
+  (j/has-children?
+    [:tuple @{}
+     [:symbol @{} "+"] [:whitespace @{} " "]
+     [:number @{} "1"] [:whitespace @{} " "]
+     [:number @{} "2"]])
+  # =>
+  true
+
+  (j/has-children? [:number @{} "8"])
+  # =>
+  false
+
+  )
+
+(defn j/zip
+  ``
+  Returns a zipper location (zloc or z-location) for a tree
+  representing Janet code.
+  ``
+  [a-tree]
+  (defn branch?_
+    [a-node]
+    (truthy? (and (indexed? a-node)
+                  (not (empty? a-node))
+                  (j/has-children? a-node))))
+  #
+  (defn children_
+    [a-node]
+    (if (branch?_ a-node)
+      (slice a-node 2)
+      (error "Called `children` on a non-branch node")))
+  #
+  (defn make-node_
+    [a-node kids]
+    [(first a-node) (get a-node 1) ;kids])
+  #
+  (j/zipper a-tree branch?_ children_ make-node_))
+
+(comment
+
+  (def root-node
+    @[:code @{} [:number @{} "8"]])
+
+  (def [the-node the-state]
+    (j/zip root-node))
+
+  the-node
+  # =>
+  root-node
+
+  # merge is used to "remove" the prototype table of `st`
+  (merge {} the-state)
+  # =>
+  @{}
+
+  )
+
+(defn j/attrs
+  ``
+  Return the attributes table for the node of a z-location.  The
+  attributes table contains at least bounds of the node by 1-based line
+  and column numbers along with 0-based positions.
+  ``
+  [zloc]
+  (get (j/node zloc) 1))
+
+(comment
+
+  (-> (j/par "(+ 1 3)")
+      j/zip
+      j/down
+      j/attrs)
+  # =>
+  @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+
+  )
+
+(defn j/zip-down
+  ``
+  Convenience function that returns a zipper which has
+  already had `down` called on it.
+  ``
+  [a-tree]
+  (-> (j/zip a-tree)
+      j/down))
+
+(comment
+
+  (-> (j/par "(+ 1 3)")
+      j/zip-down
+      j/node)
+  # =>
+  [:tuple @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+   [:symbol @{:bl 1 :el 1 :bc 2 :ep 2 :bp 1 :ec 3} "+"]
+   [:whitespace @{:bl 1 :el 1 :bc 3 :ep 3 :bp 2 :ec 4} " "]
+   [:number @{:bl 1 :el 1 :bc 4 :ep 4 :bp 3 :ec 5} "1"]
+   [:whitespace @{:bl 1 :el 1 :bc 5 :ep 5 :bp 4 :ec 6} " "]
+   [:number @{:bl 1 :el 1 :bc 6 :ep 6 :bp 5 :ec 7} "3"]]
+
+  (-> (j/par "(/ 1 8)")
+      j/zip-down
+      j/root)
+  # =>
+  @[:code @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+    [:tuple @{:bl 1 :el 1 :bc 1 :ep 7 :bp 0 :ec 8}
+     [:symbol @{:bl 1 :el 1 :bc 2 :ep 2 :bp 1 :ec 3} "/"]
+     [:whitespace @{:bl 1 :el 1 :bc 3 :ep 3 :bp 2 :ec 4} " "]
+     [:number @{:bl 1 :el 1 :bc 4 :ep 4 :bp 3 :ec 5} "1"]
+     [:whitespace @{:bl 1 :el 1 :bc 5 :ep 5 :bp 4 :ec 6} " "]
+     [:number @{:bl 1 :el 1 :bc 6 :ep 6 :bp 5 :ec 7} "8"]]]
+
+  )
+
+# wsc == whitespace, comment
+(defn j/right-skip-wsc
+  ``
+  Try to move right from `zloc`, skipping over whitespace
+  and comment nodes.
+
+  When at least one right move succeeds, return the z-location
+  for the last successful right move destination.  Otherwise,
+  return nil.
+  ``
+  [zloc]
+  (j/right-until zloc
+               |(match (j/node $)
+                  [:whitespace]
+                  false
+                  #
+                  [:comment]
+                  false
+                  #
+                  true)))
+
+(comment
+
+  (-> (j/par (string "(# hi there\n"
+                   "+ 1 2)"))
+      j/zip-down
+      j/down
+      j/right-skip-wsc
+      j/node)
+  # =>
+  [:symbol @{:bl 2 :el 2 :bc 1 :ep 13 :bp 12 :ec 2} "+"]
+
+  (-> (j/par "(:a)")
+      j/zip-down
+      j/down
+      j/right-skip-wsc)
+  # =>
+  nil
+
+  )
+
+(defn j/left-skip-wsc
+  ``
+  Try to move left from `zloc`, skipping over whitespace
+  and comment nodes.
+
+  When at least one left move succeeds, return the z-location
+  for the last successful left move destination.  Otherwise,
+  return nil.
+  ``
+  [zloc]
+  (j/left-until zloc
+              |(match (j/node $)
+                 [:whitespace]
+                 false
+                 #
+                 [:comment]
+                 false
+                 #
+                 true)))
+
+(comment
+
+  (-> (j/par (string "(# hi there\n"
+                   "+ 1 2)"))
+      j/zip-down
+      j/down
+      j/right-skip-wsc
+      j/right-skip-wsc
+      j/left-skip-wsc
+      j/node)
+  # =>
+  [:symbol @{:bl 2 :el 2 :bc 1 :ep 13 :bp 12 :ec 2} "+"]
+
+  (-> (j/par "(:a)")
+      j/zip-down
+      j/down
+      j/left-skip-wsc)
+  # =>
+  nil
+
+  )
+
+# ws == whitespace
+(defn j/right-skip-ws
+  ``
+  Try to move right from `zloc`, skipping over whitespace
+  nodes.
+
+  When at least one right move succeeds, return the z-location
+  for the last successful right move destination.  Otherwise,
+  return nil.
+  ``
+  [zloc]
+  (j/right-until zloc
+               |(match (j/node $)
+                  [:whitespace]
+                  false
+                  #
+                  true)))
+
+(comment
+
+  (-> (j/par (string "( # hi there\n"
+                   "+ 1 2)"))
+      j/zip-down
+      j/down
+      j/right-skip-ws
+      j/node)
+  # =>
+  [:comment @{:bl 1 :el 1 :bc 3 :ep 12 :bp 2 :ec 13} "# hi there"]
+
+  (-> (j/par "(:a)")
+      j/zip-down
+      j/down
+      j/right-skip-ws)
+  # =>
+  nil
+
+  )
+
+(defn j/left-skip-ws
+  ``
+  Try to move left from `zloc`, skipping over whitespace
+  nodes.
+
+  When at least one left move succeeds, return the z-location
+  for the last successful left move destination.  Otherwise,
+  return nil.
+  ``
+  [zloc]
+  (j/left-until zloc
+              |(match (j/node $)
+                 [:whitespace]
+                 false
+                 #
+                 true)))
+
+(comment
+
+  (-> (j/par (string "(# hi there\n"
+                   "+ 1 2)"))
+      j/zip-down
+      j/down
+      j/right
+      j/right
+      j/left-skip-ws
+      j/node)
+  # =>
+  [:comment @{:bl 1 :el 1 :bc 2 :ep 11 :bp 1 :ec 12} "# hi there"]
+
+  (-> (j/par "(:a)")
+      j/zip-down
+      j/down
+      j/left-skip-ws)
+  # =>
+  nil
+
+  )
+
+
+(comment import ./verify :prefix "")
+# XXX: try to put in file?  had trouble originally when working on
+#      judge-gen.  may be will have more luck?
+(def v/as-string
+  ``
+  # influenced by janet's tools/helper.janet
+
+  (var _verify/start-time 0)
+  (var _verify/end-time 0)
+  (var _verify/test-results @[])
+
+  (defmacro _verify/is
+    [t-form e-form line-no name & rest]
+    (with-syms [$ts $tr
+                $es $er]
+      ~(do
+         (def [,$ts ,$tr] (as-macro ,protect (,eval ',t-form)))
+         (def [,$es ,$er] (as-macro ,protect (,eval ',e-form)))
+         (,array/push _verify/test-results
+                      @{:test-form ',t-form
+                        :test-status ,$ts
+                        :test-value ,$tr
+                        #
+                        :expected-form ',e-form
+                        :expected-status ,$es
+                        :expected-value ,$er
+                        #
+                        :line-no ,line-no
+                        :name ,name
+                        :rest ',rest
+                        :passed (if (as-macro ,and ,$ts ,$es)
+                                  (,deep= ,$tr ,$er)
+                                  nil)})
+         ,name)))
+
+  (defn _verify/start-tests
+    []
+    (set _verify/start-time (os/clock))
+    (set _verify/test-results @[]))
+
+  (defn _verify/end-tests
+    []
+    (set _verify/end-time (os/clock)))
+
+  (defn _verify/report
+    []
+    # find and massage failures
+    (def fails
+      (keep (fn [r]
+              (when (not (get r :passed))
+                (def t-value (get r :test-value))
+                (def [tr ts] (protect (string/format "%j" t-value)))
+                (when (not tr)
+                  (-> r
+                      (put :test-value (string/format "%m" t-value))
+                      (put :test-unreadable true)))
+                (def e-value (get r :expected-value))
+                (def [er es] (protect (string/format "%j" e-value)))
+                (when (not er)
+                  (-> r
+                      (put :expected-value (string/format "%m" e-value))
+                      (put :expected-unreadable true)))
+                #
+                r))
+            _verify/test-results))
+    # prepare test results
+    (def test-results
+      @{:num-tests (length _verify/test-results)
+        :fails fails})
+    # output a separator before the test output
+    (print (string/repeat "#" 72) "\n")
+    # report test results
+    (printf "%j" test-results)
+    # signal if there were any failures
+    (when (not (empty? fails))
+      (os/exit 1)))
+  ``)
+
+
+
+# at its simplest, a test is expressed like:
+#
+# (comment
+#
+#   (+ 1 1)
+#   # =>
+#   2
+#
+#   )
+#
+# i.e. inside a comment form, a single test consists of:
+#
+# * a test expression        - `(+ 1 1)`
+# * a test indicator         - `# =>`
+# * an expected expression   - `2`
+#
+# there can be one or more tests within a comment form.
+
+# ti == test indicator, which can look like any of:
+#
+# # =>
+# # before =>
+# # => after
+# # before => after
+#
+# further constraint that neither `before` nor `after` should contain
+# a hash character (#)
+
+(defn r/find-test-indicator
+  [zloc]
+  (var label-left nil)
+  (var label-right nil)
+  [(j/right-until zloc
+                  |(match (j/node $)
+                     [:comment _ content]
+                     (if-let [[l r]
+                              (peg/match ~(sequence "#"
+                                                    (capture (to "=>"))
+                                                    "=>"
+                                                    (capture (thru -1)))
+                                         content)
+                              _no-hash-left (nil? (string/find "#" l))
+                              _no-hash-right (nil? (string/find "#" r))]
+                       (do
+                         (set label-left (string/trim l))
+                         (set label-right (string/trim r))
+                         true)
+                       false)))
+   label-left
+   label-right])
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(+ 1 1)" eol
+            "# =>"    eol
+            "2"))
+
+  (let [[zloc l r]
+        (r/find-test-indicator (-> (j/par src)
+                                 j/zip-down))]
+    (and zloc
+         (empty? l)
+         (empty? r)))
+  # =>
+  true
+
+  (def src
+    (string "(+ 1 1)"     eol
+            "# before =>" eol
+            "2"))
+
+  (let [[zloc l r]
+        (r/find-test-indicator (-> (j/par src)
+                                 j/zip-down))]
+    (and zloc
+         (= "before" l)
+         (empty? r)))
+  # =>
+  true
+
+  (def src
+    (string "(+ 1 1)"    eol
+            "# => after" eol
+            "2"))
+
+  (let [[zloc l r]
+        (r/find-test-indicator (-> (j/par src)
+                                 j/zip-down))]
+    (and zloc
+         (empty? l)
+         (= "after" r)))
+  # =>
+  true
+
+  )
+
+(defn r/find-test-expr
+  [ti-zloc]
+  # check for appropriate conditions "before"
+  (def before-zlocs @[])
+  (var curr-zloc ti-zloc)
+  (var found-before nil)
+  # collect zlocs to the left of the test indicator up through the
+  # first non-whitespace/comment one.  if there is a
+  # non-whitespace/comment one, that is the test expression.
+  (while curr-zloc
+    (set curr-zloc (j/left curr-zloc))
+    (when (nil? curr-zloc)
+      (break))
+    #
+    (match (j/node curr-zloc)
+      [:comment]
+      (array/push before-zlocs curr-zloc)
+      #
+      [:whitespace]
+      (array/push before-zlocs curr-zloc)
+      #
+      (do
+        (set found-before true)
+        (array/push before-zlocs curr-zloc)
+        (break))))
+  #
+  (cond
+    (nil? curr-zloc)
+    :no-test-expression
+    # if all collected zlocs (except the last one) are whitespace,
+    # then the test expression has been located
+    (and found-before
+         (->> (slice before-zlocs 0 -2)
+              (filter |(not (match (j/node $)
+                              [:whitespace]
+                              true)))
+              length
+              zero?))
+    curr-zloc
+    #
+    :unexpected-result))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"         eol
+            eol
+            "  (def a 1)"      eol
+            eol
+            "  (put @{} :a 2)" eol
+            "  # =>"           eol
+            "  @{:a 2}"        eol
+            eol
+            "  )"))
+
+  (def [ti-zloc _ _]
+    (r/find-test-indicator (-> (j/par src)
+                             j/zip-down
+                             j/down)))
+
+  (j/node ti-zloc)
+  # =>
+  [:comment @{:bc 3 :bl 6 :bp 42 :ec 7 :el 6 :ep 46} "# =>"]
+
+  (def test-expr-zloc (r/find-test-expr ti-zloc))
+
+  (j/node test-expr-zloc)
+  # =>
+  [:tuple @{:bc 3 :bl 5 :bp 25 :ec 17 :el 5 :ep 39}
+   [:symbol @{:bc 4 :bl 5 :bp 26 :ec 7 :el 5 :ep 29} "put"]
+   [:whitespace @{:bc 7 :bl 5 :bp 29 :ec 8 :el 5 :ep 30} " "]
+   [:table @{:bc 8 :bl 5 :bp 30 :ec 11 :el 5 :ep 33}]
+   [:whitespace @{:bc 11 :bl 5 :bp 33 :ec 12 :el 5 :ep 34} " "]
+   [:keyword @{:bc 12 :bl 5 :bp 34 :ec 14 :el 5 :ep 36} ":a"]
+   [:whitespace @{:bc 14 :bl 5 :bp 36 :ec 15 :el 5 :ep 37} " "]
+   [:number @{:bc 15 :bl 5 :bp 37 :ec 16 :el 5 :ep 38} "2"]]
+
+  (-> (j/left test-expr-zloc)
+      j/node)
+  # =>
+  [:whitespace @{:bc 1 :bl 5 :bp 23 :ec 3 :el 5 :ep 25} "  "]
+
+  )
+
+(defn r/find-expected-expr
+  [ti-zloc]
+  (def after-zlocs @[])
+  (var curr-zloc ti-zloc)
+  (var found-comment nil)
+  (var found-after nil)
+  # collect zlocs to the right of the test indicator up through the
+  # first non-whitespace/comment one.  if there is a
+  # non-whitespace/comment one, that is the expression used to compute
+  # the expected value.
+  (while curr-zloc
+    (set curr-zloc (j/right curr-zloc))
+    (when (nil? curr-zloc)
+      (break))
+    #
+    (match (j/node curr-zloc)
+      [:comment]
+      (do
+        (set found-comment true)
+        (break))
+      #
+      [:whitespace]
+      (array/push after-zlocs curr-zloc)
+      #
+      (do
+        (set found-after true)
+        (array/push after-zlocs curr-zloc)
+        (break))))
+  #
+  (cond
+    (or (nil? curr-zloc)
+        found-comment)
+    :no-expected-expression
+    # if there was a non-whitespace/comment zloc and the first zloc
+    # "captured" represents eol (i.e. the first zloc to the right of
+    # the test indicator), then there might be a an "expected
+    # expression" that follows...
+    (and found-after
+         (match (j/node (first after-zlocs))
+           [:whitespace _ "\n"]
+           true
+           [:whitespace _ "\r\n"]
+           true))
+    # starting on the line after the eol zloc, keep collected zlocs up
+    # to (but not including) another eol zloc.  the first
+    # non-whitespace zloc of the kept zlocs represents the "expected
+    # expression".
+    (if-let [from-next-line (drop 1 after-zlocs)
+             before-eol-zloc (take-until |(match (j/node $)
+                                            [:whitespace _ "\n"]
+                                            true
+                                            [:whitespace _ "\r\n"]
+                                            true)
+                                         from-next-line)
+             target (->> before-eol-zloc
+                         (filter |(match (j/node $)
+                                    [:whitespace]
+                                    false
+                                    #
+                                    true))
+                         first)]
+      target
+      :no-expected-expression)
+    #
+    :unexpected-result))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"         eol
+            eol
+            "  (def a 1)"      eol
+            eol
+            "  (put @{} :a 2)" eol
+            "  # =>"           eol
+            "  @{:a 1"         eol
+            "    :b 2}"        eol
+            eol
+            "  )"))
+
+  (def [ti-zloc _ _]
+    (r/find-test-indicator (-> (j/par src)
+                             j/zip-down
+                             j/down)))
+
+  (j/node ti-zloc)
+  # =>
+  [:comment @{:bc 3 :bl 6 :bp 42 :ec 7 :el 6 :ep 46} "# =>"]
+
+  (def expected-expr-zloc (r/find-expected-expr ti-zloc))
+
+  (j/node expected-expr-zloc)
+  # =>
+  [:table @{:bc 3 :bl 7 :bp 49 :ec 10 :el 8 :ep 65}
+   [:keyword @{:bc 5 :bl 7 :bp 51 :ec 7 :el 7 :ep 53} ":a"]
+   [:whitespace @{:bc 7 :bl 7 :bp 53 :ec 8 :el 7 :ep 54} " "]
+   [:number @{:bc 8 :bl 7 :bp 54 :ec 9 :el 7 :ep 55} "1"]
+   [:whitespace @{:bc 9 :bl 7 :bp 55 :ec 1 :el 8 :ep 56} "\n"]
+   [:whitespace @{:bc 1 :bl 8 :bp 56 :ec 5 :el 8 :ep 60} "    "]
+   [:keyword @{:bc 5 :bl 8 :bp 60 :ec 7 :el 8 :ep 62} ":b"]
+   [:whitespace @{:bc 7 :bl 8 :bp 62 :ec 8 :el 8 :ep 63} " "]
+   [:number @{:bc 8 :bl 8 :bp 63 :ec 9 :el 8 :ep 64} "2"]]
+
+  (-> (j/left expected-expr-zloc)
+      j/node)
+  # =>
+  [:whitespace @{:bc 1 :bl 7 :bp 47 :ec 3 :el 7 :ep 49} "  "]
+
+  (def src
+    (string "(comment"                eol
+            eol
+            "  (butlast @[:a :b :c])" eol
+            "  # => @[:a :b]"         eol
+            eol
+            "  (butlast [:a])"        eol
+            "  # => []"               eol
+            eol
+            ")"))
+
+  (def [ti-zloc _ _]
+    (r/find-test-indicator (-> (j/par src)
+                             j/zip-down
+                             j/down)))
+
+  (j/node ti-zloc)
+  # =>
+  [:comment @{:bc 3 :bl 4 :bp 36 :ec 16 :el 4 :ep 49} "# => @[:a :b]"]
+
+  (r/find-expected-expr ti-zloc)
+  # =>
+  :no-expected-expression
+
+  )
+
+(defn r/make-label
+  [left right]
+  (string ""
+          (when (not (empty? left))
+            left)
+          (cond
+            (not (empty? left))
+            " =>"
+            #
+            (not (empty? right))
+            "=>"
+            #
+            "")
+          (when (not (empty? right))
+            (string " " right))))
+
+(comment
+
+  (r/make-label "hi" "there")
+  # =>
+  "hi => there"
+
+  (r/make-label "hi" "")
+  # =>
+  "hi =>"
+
+  (r/make-label "" "there")
+  # =>
+  "=> there"
+
+  (r/make-label "" "")
+  # =>
+  ""
+
+  )
+
+(defn r/find-exprs
+  [ti-zloc]
+  (def b {:in "find-exprs" :args {:ti-zloc ti-zloc}})
+  # look for a test expression
+  (def test-expr-zloc (r/find-test-expr ti-zloc))
+  (case test-expr-zloc
+    :no-test-expression
+    (break [nil nil])
+    #
+    :unexpected-result
+    (e/emf b "unexpected result from `find-test-expr`: %p"
+           test-expr-zloc))
+  # look for an expected value expression
+  (def expected-expr-zloc (r/find-expected-expr ti-zloc))
+  (case expected-expr-zloc
+    :no-expected-expression
+    (break [test-expr-zloc nil])
+    #
+    :unexpected-result
+    (e/emf b "unexpected result from `find-expected-expr`: %p"
+           expected-expr-zloc))
+  #
+  [test-expr-zloc expected-expr-zloc])
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(+ 1 1)" eol
+            "# =>"    eol
+            "2"))
+
+  (def [ti-zloc _ _]
+    (r/find-test-indicator (-> (j/par src)
+                             j/zip-down)))
+
+  (def [t-zloc e-zloc] (r/find-exprs ti-zloc))
+
+  (j/gen (j/node t-zloc))
+  # =>
+  "(+ 1 1)"
+
+  (j/gen (j/node e-zloc))
+  # =>
+  "2"
+
+  )
+
+(defn r/wrap-as-test-call
+  [start-zloc end-zloc ti-line-no test-label {:bp bp :ep ep :bc bc}]
+  # XXX: hack - not sure if robust enough
+  (def eol-str (if (= :windows (os/which)) "\r\n" "\n"))
+  (-> (j/wrap start-zloc [:tuple @{}] end-zloc)
+      # newline important for preserving long strings
+      (j/insert-child [:whitespace @{} eol-str])
+      # name of test macro
+      (j/insert-child [:symbol @{} "_verify/is"])
+      # for column zero convention, insert leading whitespace
+      # before the beginning of the tuple (_verify/is ...)
+      (j/insert-left [:whitespace @{} "  "])
+      # add location info argument
+      (j/append-child [:whitespace @{} " "])
+      (j/append-child [:number @{} (string ti-line-no)])
+      #
+      (j/append-child [:whitespace @{} " "])
+      (j/append-child [:string @{} test-label])
+      # start position of test expression
+      (j/append-child [:whitespace @{} " "])
+      (j/append-child [:number @{} (string bp)])
+      # end position of test expression
+      (j/append-child [:whitespace @{} " "])
+      (j/append-child [:number @{} (string ep)])
+      # start column of test expression; adjust to 0-based
+      (j/append-child [:whitespace @{} " "])
+      (j/append-child [:number @{} (string (dec bc))])))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(+ 1 1)" eol
+            "# =>"    eol
+            "2"))
+
+  (def [ti-zloc _ _]
+    (r/find-test-indicator (-> (j/par src)
+                             j/zip-down)))
+
+  (def [t-zloc e-zloc] (r/find-exprs ti-zloc))
+
+  (let [left-of-t-zloc (j/left t-zloc)
+        start-zloc (match (j/node left-of-t-zloc)
+                     [:whitespace]
+                     left-of-t-zloc
+                     #
+                     t-zloc)
+        w-zloc (r/wrap-as-test-call start-zloc e-zloc 3 `""`
+                                  (get (j/node t-zloc) 1))]
+    (j/gen (j/node w-zloc)))
+  # =>
+  (string "(_verify/is\n"
+          "(+ 1 1)\n"
+          "# =>\n"
+          "2 "
+          "3 "
+          `"" `
+          "0 "
+          "7 "
+          "0"
+          ")")
+
+  )
+
+(defn r/rewrite-with-tests
+  [comment-zloc]
+  # move into comment block
+  (var curr-zloc (j/down comment-zloc))
+  (var found-test nil)
+  # process comment block content
+  (while (not (j/end? curr-zloc))
+    (def [ti-zloc label-left label-right] (r/find-test-indicator curr-zloc))
+    (when (not ti-zloc)
+      (break))
+    #
+    (def [test-expr-zloc expected-expr-zloc] (r/find-exprs ti-zloc))
+    (set curr-zloc
+         (if (or (nil? test-expr-zloc)
+                 (nil? expected-expr-zloc))
+           (j/right curr-zloc) # next
+           # found a complete test, work on rewriting
+           (let [left-of-te-zloc (j/left test-expr-zloc)
+                 start-zloc (match (j/node left-of-te-zloc)
+                              [:whitespace]
+                              left-of-te-zloc
+                              #
+                              test-expr-zloc)
+                 end-zloc expected-expr-zloc
+                 # XXX: use `attrs` here?
+                 ti-line-no ((get (j/node ti-zloc) 1) :bl)
+                 test-label
+                 (string/format "%q"
+                                (r/make-label label-left label-right))]
+             (set found-test true)
+             (r/wrap-as-test-call start-zloc end-zloc
+                                ti-line-no test-label
+                                (get (j/node test-expr-zloc) 1))))))
+  # navigate back out to top of block
+  (when found-test
+    # morph comment block into plain tuple -- to be unwrapped later
+    (-> curr-zloc
+        j/up
+        j/down
+        (j/replace [:whitespace @{} " "])
+        # begin hack to prevent trailing whitespace once unwrapping occurs
+        j/rightmost
+        (j/insert-right [:keyword @{} ":smile"])
+        # end of hack
+        j/up)))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"         eol
+            eol
+            "  (def a 1)"      eol
+            eol
+            "  (put @{} :a 2)" eol
+            "  # left =>"      eol
+            "  @{:a 2}"        eol
+            eol
+            "  (+ 1 1)"        eol
+            "  # => right"     eol
+            "  2"              eol
+            eol
+            "  )"))
+
+  (-> (j/par src)
+      j/zip-down
+      r/rewrite-with-tests
+      j/root
+      j/gen)
+  # =>
+  (string "( "                             eol
+          eol
+          "  (def a 1)"                    eol
+          eol
+          "  (_verify/is"                  eol
+          "  (put @{} :a 2)"               eol
+          "  # left =>"                    eol
+          `  @{:a 2} 6 "left =>" 25 39 2)` eol
+          eol
+          "  (_verify/is"                  eol
+          "  (+ 1 1)"                      eol
+          "  # => right"                   eol
+          `  2 10 "=> right" 65 72 2)`     eol
+          eol
+          "  :smile)")
+
+  )
+
+(defn r/rewrite-comment-block
+  [comment-src]
+  (-> (j/par comment-src)
+      j/zip-down
+      r/rewrite-with-tests
+      j/root
+      j/gen))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"          eol
+            eol
+            "  (def a 1)"       eol
+            eol
+            "  (put @{} :a 2)"  eol
+            "  # =>"            eol
+            "  @{:a 2}"         eol
+            eol
+            "  (+ 1 1)"         eol
+            "  # left => right" eol
+            "  2"               eol
+            eol
+            "  )"))
+
+  (r/rewrite-comment-block src)
+  # =>
+  (string "( "                              eol
+          eol
+          "  (def a 1)"                     eol
+          eol
+          "  (_verify/is"                   eol
+          "  (put @{} :a 2)"                eol
+          "  # =>"                          eol
+          `  @{:a 2} 6 "" 25 39 2)`         eol
+          eol
+          "  (_verify/is"                   eol
+          "  (+ 1 1)"                       eol
+          "  # left => right"               eol
+          `  2 10 "left => right" 60 67 2)` eol
+          eol
+          "  :smile)")
+
+  )
+
+(defn r/rewrite-comments-with
+  [src xform-fn]
+  (var changed nil)
+  # XXX: hack - not sure if robust enough
+  (def eol-str (if (= :windows (os/which)) "\r\n" "\n"))
+  (var curr-zloc
+    (-> (j/par src)
+        j/zip-down
+        # XXX: leading newline is a hack to prevent very first thing
+        #      from being a comment block
+        (j/insert-left [:whitespace @{} eol-str])
+        # XXX: once the newline is inserted, need to move to it
+        j/left))
+  #
+  (while (not (j/end? curr-zloc))
+    # try to find a top-level comment block
+    (if-let [comment-zloc
+             (j/right-until curr-zloc
+                            |(match (j/node $)
+                               [:tuple _ [:symbol _ "comment"]]
+                               true))]
+      # may be rewrite the located top-level comment block
+      (set curr-zloc
+           (if-let [rewritten-zloc
+                    (xform-fn comment-zloc)]
+             (do
+               (set changed true)
+               (j/unwrap rewritten-zloc))
+             comment-zloc))
+      (break)))
+  #
+  (when changed
+    (-> curr-zloc
+        j/root
+        j/gen)))
+
+(defn r/rewrite
+  [src]
+  (r/rewrite-comments-with src r/rewrite-with-tests))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string `(require "json")` eol
+            eol
+            "(defn my-fn"      eol
+            "  [x]"            eol
+            "  (+ x 1))"       eol
+            eol
+            "(comment"         eol
+            eol
+            "  (def a 1)"      eol
+            eol
+            "  (put @{} :a 2)" eol
+            "  # =>"           eol
+            "  @{:a 2}"        eol
+            eol
+            "  (my-fn 1)"      eol
+            "  # =>"           eol
+            "  2"              eol
+            eol
+            "  )"              eol
+            eol
+            "(defn your-fn"    eol
+            "  [y]"            eol
+            "  (* y y))"       eol
+            eol
+            "(comment"         eol
+            eol
+            "  (your-fn 3)"    eol
+            "  # =>"           eol
+            "  9"              eol
+            eol
+            "  (def b 1)"      eol
+            eol
+            "  (+ b 1)"        eol
+            "  # =>"           eol
+            "  2"              eol
+            eol
+            "  (def c 2)"      eol
+            eol
+            "  )"              eol
+            ))
+
+  (r/rewrite src)
+  # =>
+  (string eol
+          `(require "json")`               eol
+          eol
+          "(defn my-fn"                    eol
+          "  [x]"                          eol
+          "  (+ x 1))"                     eol
+          eol
+          " "                              eol
+          eol
+          "  (def a 1)"                    eol
+          eol
+          "  (_verify/is"                  eol
+          "  (put @{} :a 2)"               eol
+          "  # =>"                         eol
+          `  @{:a 2} 12 "" 73 87 2)`       eol
+          eol
+          "  (_verify/is"                  eol
+          "  (my-fn 1)"                    eol
+          "  # =>"                         eol
+          `  2 16 "" 108 117 2)`           eol
+          eol
+          "  :smile"                       eol
+          eol
+          "(defn your-fn"                  eol
+          "  [y]"                          eol
+          "  (* y y))"                     eol
+          eol
+          " "                              eol
+          eol
+          "  (_verify/is"                  eol
+          "  (your-fn 3)"                  eol
+          "  # =>"                         eol
+          `  9 28 "" 179 190 2)`           eol
+          eol
+          "  (def b 1)"                    eol
+          eol
+          "  (_verify/is"                  eol
+          "  (+ b 1)"                      eol
+          "  # =>"                         eol
+          `  2 34 "" 218 225 2)`           eol
+          eol
+          "  (def c 2)"                    eol
+          eol
+          "  :smile"                       eol)
+
+  )
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  # https://github.com/sogaiu/judge-gen/issues/1
+  (def src
+    (string "(comment"        eol
+            eol
+            "  (-> ``"        eol
+            "      123456789" eol
+            "      ``"        eol
+            "      length)"   eol
+            "  # =>"          eol
+            "  9"             eol
+            eol
+            "  (->"           eol
+            "    ``"          eol
+            "    123456789"   eol
+            "    ``"          eol
+            "    length)"     eol
+            "  # =>"          eol
+            "  9"             eol
+            eol
+            "  )"))
+
+  (r/rewrite src)
+  # =>
+  (string eol
+          " "                        eol
+          eol
+          "  (_verify/is"            eol
+          "  (-> ``"                 eol
+          "      123456789"          eol
+          "      ``"                 eol
+          "      length)"            eol
+          "  # =>"                   eol
+          `  9 7 "" 12 57 2)`        eol
+          eol
+          "  (_verify/is"            eol
+          "  (->"                    eol
+          "    ``"                   eol
+          "    123456789"            eol
+          "    ``"                   eol
+          "    length)"              eol
+          "  # =>"                   eol
+          `  9 15 "" 72 115 2)`      eol
+          eol
+          "  :smile")
+
+  )
+
+(defn r/rewrite-as-test-file
+  [src]
+  (when (not (empty? src))
+    (when-let [rewritten (r/rewrite src)]
+      # XXX: hack - not sure if robust enough
+      (def eol-str (if (= :windows (os/which)) "\r\n" "\n"))
+      (string v/as-string
+              eol-str
+              "(_verify/start-tests)"
+              eol-str
+              rewritten
+              eol-str
+              "(_verify/end-tests)"
+              eol-str
+              "(_verify/report)"
+              eol-str))))
+
+(defn r/rewrite-with-only-test-exprs
+  [comment-zloc]
+  # move into comment block
+  (var curr-zloc (j/down comment-zloc))
+  (var found-test nil)
+  # process comment block content
+  (while (not (j/end? curr-zloc))
+    (def [ti-zloc _label-left _label-right] (r/find-test-indicator curr-zloc))
+    (when (not ti-zloc)
+      (break))
+    #
+    (def [test-expr-zloc expected-expr-zloc] (r/find-exprs ti-zloc))
+    (set curr-zloc
+         (if (or (nil? test-expr-zloc)
+                 (nil? expected-expr-zloc))
+           (j/right curr-zloc) # next
+           # found a complete test, work on rewriting
+           (do
+             (set found-test true)
+             (-> (j/wrap expected-expr-zloc [:tuple @{}])
+                 (j/insert-child [:whitespace @{} " "])
+                 (j/insert-child [:symbol @{} "comment"]))))))
+  # navigate back out to top of block
+  (when found-test
+    # morph comment block into plain tuple -- to be unwrapped later
+    (-> curr-zloc
+        j/up
+        j/down
+        (j/replace [:whitespace @{} " "])
+        # begin hack to prevent trailing whitespace once unwrapping occurs
+        j/rightmost
+        (j/insert-right [:keyword @{} ":smile"])
+        # end of hack
+        j/up)))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"         eol
+            eol
+            "  (def a 1)"      eol
+            eol
+            "  (put @{} :a 2)" eol
+            "  # left =>"      eol
+            "  @{:a 2}"        eol
+            eol
+            "  (+ 1 1)"        eol
+            "  # => right"     eol
+            "  2"              eol
+            eol
+            "  )"))
+
+  (-> (j/par src)
+      j/zip-down
+      r/rewrite-with-only-test-exprs
+      j/root
+      j/gen)
+  # =>
+  (string "( "                     eol
+          eol
+          "  (def a 1)"            eol
+          eol
+          "  (put @{} :a 2)"       eol
+          "  # left =>"            eol
+          "  (comment @{:a 2})"    eol
+          eol
+          "  (+ 1 1)"              eol
+          "  # => right"           eol
+          "  (comment 2)"          eol
+          eol
+          "  :smile)")
+
+  )
+
+(defn r/rewrite-to-lint
+  [src]
+  (r/rewrite-comments-with src r/rewrite-with-only-test-exprs))
+
+# XXX: rewrite-comments-with adds a leading newline for processing
+#      purposes (see its source), but this causes all line numbers to
+#      be off by one.  to make the line numbers match up, the leading
+#      newline is removed.  it's nicer for the line numbers in the
+#      rewritten source to match up with the original source because
+#      linting messages can mention specific line numbers.
+(defn r/rewrite-as-file-to-lint
+  [src]
+  (when (not (empty? src))
+    (when-let [to-lint-src (r/rewrite-to-lint src)
+               nl-idx (string/find "\n" to-lint-src)]
+      # to make the line numbers match the original source
+      (string/slice to-lint-src (inc nl-idx)))))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"         eol
+            eol
+            "  (def a 1)"      eol
+            eol
+            "  (put @{} :a 2)" eol
+            "  # left =>"      eol
+            "  @{:a 2}"        eol
+            eol
+            "  (+ 1 1)"        eol
+            "  # => right"     eol
+            "  2"              eol
+            eol
+            "  )"))
+
+  (r/rewrite-as-file-to-lint src)
+  # =>
+  (string " " eol
+          eol
+          "  (def a 1)"         eol
+          eol
+          "  (put @{} :a 2)"    eol
+          "  # left =>"         eol
+          "  (comment @{:a 2})" eol
+          eol
+          "  (+ 1 1)"           eol
+          "  # => right"        eol
+          "  (comment 2)"       eol
+          eol
+          "  :smile")
+
+  )
+
+(defn r/patch-zloc
+  [a-zloc update-info]
+  (def b {:in "patch-zloc" :args {:a-zloc a-zloc :update-info update-info}})
+  (var zloc a-zloc)
+  (var ok? true)
+  (each [line value] update-info
+    (when (not zloc)
+      (break))
+    #
+    (def ti-zloc
+      (j/search-from zloc
+                     |(when-let [node (j/node $)
+                                 [n-type {:bl bl} _] node]
+                        (and (= :comment n-type)
+                             (= bl line)))))
+    (when (not ti-zloc)
+      (e/emf b "failed to find test indicator at line: %d" line))
+    #
+    (def ee-zloc (r/find-expected-expr ti-zloc))
+    (def new-node
+      (try (-> (j/par value)
+               j/zip-down
+               j/node)
+        ([e] (e/emf (merge b {:e-via-try e})
+                    "failed to create node for value: %n" value))))
+    # patch with value
+    (def new-zloc (j/replace ee-zloc new-node))
+    (when (not new-zloc)
+      (e/emf b "failed to replace with new node: %n" new-node))
+    #
+    (set zloc new-zloc))
+  #
+  (when ok? zloc))
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (string "(comment"  eol
+            eol
+            "  (+ 1 2)" eol
+            "  # =>"    eol
+            "  0"       eol
+            eol
+            "  )"))
+
+  (def zloc (-> src j/par j/zip-down))
+
+  (-> (r/patch-zloc zloc @[[4 "3"]])
+      j/root
+      j/gen)
+  # =>
+  (string "(comment"  eol
+          eol
+          "  (+ 1 2)" eol
+          "  # =>"    eol
+          "  3"       eol
+          eol
+          "  )")
+
+  )
+
+(defn r/patch
+  [input update-info &opt output]
+  (def b {:in "patch" :args {:input input :update-info update-info
+                             :output output}})
+  (default output (if (string? input) input @""))
+  (def src (cond (string? input)
+                 (slurp input)
+                 #
+                 (buffer? input)
+                 input
+                 #
+                 (e/emf b "unexpected type for input: %n" input)))
+  (when (empty? src)
+    (e/emf b "no content for input: %n" input))
+  # prepare and patch
+  (def zloc
+    (try (-> src j/par j/zip-down)
+      ([e] (e/emf (merge b {:e-via-try e})
+                  "failed to create zipper for: %n" input))))
+  (def new-zloc (r/patch-zloc zloc update-info))
+  (when (not new-zloc)
+    (break nil))
+  #
+  (def new-src
+    (try
+      (-> new-zloc j/root j/gen)
+      ([e]
+        (e/emf (merge b {:e-via-try e})
+               "failed to create src from: %n" (j/node new-zloc)))))
+  (when (not new-src)
+    (e/emf b "unexpected falsy value for new-src"))
+  #
+  (cond (buffer? output)
+        (buffer/blit output new-src)
+        #
+        (string? output)
+        (spit output new-src)
+        #
+        (e/emf b "unexpected value for output: %n" output))
+  #
+  output)
+
+(comment
+
+  (def eol (if (= :windows (os/which)) "\r\n" "\n"))
+
+  (def src
+    (buffer "(comment"             eol
+            eol
+            "  (+ 1 (- 2"          eol
+            "          (+ 1 2))) " eol
+            "  # =>"               eol
+            "  3"                  eol
+            eol
+            "  )"))
+
+  (r/patch src @[[5 "0"]] @"")
+  # =>
+  (buffer "(comment"             eol
+          eol
+          "  (+ 1 (- 2"          eol
+          "          (+ 1 2))) " eol
+          "  # =>"               eol
+          "  0"                  eol
+          eol
+          "  )")
+
+  )
+
+
+(comment import ./paths :prefix "")
+
+
+(def t/test-file-ext ".niche")
+
+(defn t/make-test-path
+  [in-path]
+  (def [fdir fname] (p/parse-path in-path))
+  #
+  (string fdir "_" fname t/test-file-ext))
+
+(comment
+
+  (t/make-test-path "tmp/hello.janet")
+  # =>
+  "tmp/_hello.janet.niche"
+
+  )
+
+(defn t/make-tests
+  [in-path &opt opts]
+  (def b {:in "make-tests" :args {:in-path in-path :opts opts}})
+  #
+  (def src (slurp in-path))
+  (def [ok? result] (protect (parse-all src)))
+  (when (not ok?)
+    (e/emf b "parse error: %s" result))
+  #
+  (def test-src (r/rewrite-as-test-file src))
+  (when (not test-src)
+    (break nil))
+  #
+  (def test-path (t/make-test-path in-path))
+  (when (and (not (get opts :overwrite))
+             (os/stat test-path :mode))
+    (e/emf (merge b {:locals {:test-path test-path}})
+           "test file already exists for: %s" in-path))
+  #
+  (spit test-path test-src)
+  #
+  test-path)
+
+(defn t/run-tests
+  [test-path]
+  (def b {:in "run-tests" :args {:test-path test-path}})
+  #
+  (try
+    (with [of (file/temp)]
+      (with [ef (file/temp)]
+        (let [# prevents any contained `main` functions from executing
+              cmd
+              ["janet" "-e" (string "(dofile `" test-path "`)")]
+              ecode
+              (os/execute cmd :p {:out of :err ef})]
+          #
+          (file/flush of)
+          (file/flush ef)
+          (file/seek of :set 0)
+          (file/seek ef :set 0)
+          # XXX: iiuc ecode cannot be nil
+          [ecode
+           (file/read of :all)
+           (file/read ef :all)])))
+    ([e]
+      (e/emf (merge b {:e-via-try e})
+             "problem running tests in: %s" test-path))))
+
+(defn t/parse-output
+  [out]
+  (def b {:in "parse-output" :args {:out out}})
+  # see verify.janet
+  (def boundary (buffer/new-filled 72 (chr "#")))
+  (def b-idx (last (string/find-all boundary out)))
+  (when (not b-idx)
+    (e/emf b "failed to find boundary in output: %n" out))
+  #
+  (def [test-out results] (string/split boundary out b-idx))
+  #
+  [(parse results) test-out])
+
+(comment
+
+  (def data
+    {:test-form '(+ 1 1)
+     :test-status true
+     :test-value 2
+     :expected-form 3
+     :expected-status true
+     :expected-value 3
+     :line-no 4
+     :passed true
+     :name ""})
+
+  (def separator (buffer/new-filled 72 (chr "#")))
+
+  (def out
+    (string
+      "hello this is a line\n"
+      "and so is this\n"
+      separator "\n"
+      (string/format "%j" data)))
+
+  (t/parse-output out)
+  # =>
+  [{:expected-form 3
+    :expected-status true
+    :expected-value 3
+    :line-no 4
+    :name ""
+    :passed true
+    :test-form '(+ 1 1)
+    :test-status true
+    :test-value 2}
+   "hello this is a line\nand so is this\n"]
+
+  )
+
+# example of first line of err-str:
+#
+#   error: d/_n.janet.niche:142:38: compile error: unknown symbol _
+(defn t/parse-error
+  [err-str]
+  (peg/match ~(sequence (thru "error: ")
+                        (capture (to "\n")))
+             err-str))
+
+(defn t/has-unreadable?
+  [test-results]
+  (var unreadable? nil)
+  (each f (get test-results :fails)
+    (when (get f :test-unreadable)
+      (set unreadable? f)
+      (break))
+    #
+    (when (get f :expected-unreadable)
+      (set unreadable? f)
+      (break)))
+  #
+  unreadable?)
+
+(defn t/make-and-run
+  [input &opt opts]
+  (def b @{:in "make-and-run" :args {:input input :opts opts}})
+  #
+  (default opts @{})
+  # create test source
+  (def result (t/make-tests input opts))
+  (cond
+    (not result)
+    (break [:no-tests nil nil nil])
+    #
+    (= :parse-error result)
+    (break [:parse-error nil nil nil]))
+  #
+  (def test-path result)
+  # run tests and collect output
+  (def [exit-code out err] (t/run-tests test-path))
+  #
+  (when (empty? out)
+    (when (t/parse-error err)
+      (def extra (if (os/getenv "VERBOSE")
+                   "see stacktrace below"
+                   "rerun with VERBOSE=1 for details"))
+      (e/emf (merge b {:stacktrace err})
+             "error running test file, %s" extra)))
+  #
+  (os/rm test-path)
+  #
+  (def [test-results test-out] (t/parse-output out))
+  (when-let [unreadable (t/has-unreadable? test-results)]
+    (e/emf b (string/format "unreadable value in:\n%s"
+                            (if (dyn :test/color?) "%M" "%m"))
+           unreadable))
+  #
+  [exit-code test-results test-out err])
+
+
+
+########################################################################
+
+(defn c/summarize
+  [noted-paths]
+  # pass / fail
+  (def ps-paths (get noted-paths :pass))
+  (def fl-paths (get noted-paths :fail))
+  #
+  (when fl-paths
+    (def n-ps-paths (length ps-paths))
+    (def n-fl-paths (length fl-paths))
+    (when (empty? fl-paths)
+      (l/notenf :i "All tests successful in %d file(s)."
+                n-ps-paths))
+    (when (not (empty? fl-paths))
+      (l/notenf :i "Test failures in %d of %d file(s)."
+                n-fl-paths (+ n-fl-paths n-ps-paths)))))
+
+########################################################################
+
+(defn c/mrr-single
+  [input &opt opts]
+  # try to make and run tests, then collect output
+  (def [exit-code test-results test-out test-err]
+    (t/make-and-run input opts))
+  (when (= :no-tests exit-code)
+    (break [:no-tests nil nil]))
+  #
+  (def {:report report} opts)
+  (default report o/report)
+  # print out results
+  (report input test-results test-out test-err)
+  #
+  (when (not= 0 exit-code)
+    (break [:exit-code test-results]))
+  #
+  [:no-fails test-results])
+
+(defn c/tally-mrr-result
+  [path [desc tr] noted-paths]
+  (def b @{:in "tally-mrr-result"
+           :args {:path path :single-result [desc tr]
+                  :noted-paths noted-paths}})
+  #
+  (case desc
+    :no-tests
+    (l/noten :i " - no tests found")
+    #
+    :no-fails
+    (let [n-tests (get tr :num-tests)
+          ratio (o/color-ratio n-tests n-tests)]
+      (l/notenf :i " - [%s]" ratio)
+      (array/push (get noted-paths :pass) path))
+    #
+    :exit-code
+    (let [n-tests (get tr :num-tests)
+          n-passes (- n-tests (length (get tr :fails)))
+          ratio (o/color-ratio n-passes n-tests)]
+      (l/notenf :i "[%s]" ratio)
+      (array/push (get noted-paths :fail) path))
+    #
+    (e/emf b "unexpected result %p for: %s" desc path)))
+
+(defn c/make-run-report
+  [src-paths opts]
+  (def excludes (get opts :excludes))
+  (def noted-paths @{:pass @[] :fail @[]})
+  (def test-results @[])
+  # generate tests, run tests, and report
+  (each path src-paths
+    (when (and (not (has-value? excludes path)) (f/is-file? path))
+      (l/note :i path)
+      (def single-result (c/mrr-single path opts))
+      (def [_ tr] single-result)
+      (array/push test-results [path tr])
+      (c/tally-mrr-result path single-result noted-paths)))
+  #
+  (l/notenf :i (o/separator "="))
+  (c/summarize noted-paths)
+  #
+  (def exit-code (if (empty? (get noted-paths :fail)) 0 1))
+  #
+  [exit-code test-results])
+
+
+(comment import ./docs :prefix "")
+(def d/usage
+  ``
+  Usage: niche [<file-or-dir>...]
+
+         niche [--help|[-h[h[h[h]]]]]
+         niche [-v|--version]
+
+  Nimbly Interpret Comment-Hidden Expressions
+
+  Parameters:
+
+    <file-or-dir>          path to file or directory
+
+  Options:
+
+    -h, --help             show this output
+    -hh                    show background material
+    -hhh                   show tutorial
+    -hhhh                  show reference
+
+    -v, --version          show version information
+
+  Configuration:
+
+    .niche.jdn             configuration file
+
+  Example uses:
+
+    1. Create and run comment-hidden expression tests in `src/`
+       directory:
+
+       $ niche src
+
+    2. A configuration file (`.niche.jdn`) can be used to
+       specify paths to operate on and avoid spelling out paths
+       at the command line:
+
+       $ niche
+
+    3. `niche` can be used via `jeep`, `jpm`, etc. with some
+       setup.  In a project's root directory, create a suitable
+       `.niche.jdn` file and a runner file in the project's
+       `test/` subdirectory.  Then, in the case of `jeep`:
+
+       $ jeep test
+
+  Example `.niche.jdn` configuration file:
+
+    {# what to work on - file and dir paths
+     :includes ["src" "bin/my-script"]
+     # what to skip - file paths only
+     :excludes ["src/sample.janet"]}
+
+  Example runner file `test/trigger-niche.janet`:
+
+    # adjust the path as needed
+    (import ../niche) # niche.janet is in project root
+
+    (niche/main)
+  ``)
+
+(def d/background
+  ``
+  Background
+  ==========
+
+  Introduction
+  ------------
+
+  While developing a function [1], it is probably not too
+  uncommon to become curious about how the function in its
+  current state actually behaves.  In such a situation, it
+  seems likely one may end up calling the function with
+  specific arguments to observe the results.
+
+  This process of calling the function as it is developed may
+  be repeated multiple times.  It is a curious thing that it is
+  not unusual for these calls and their results to be
+  discarded and subsequently to manually enter some of them
+  again.
+
+  What if it were very easy to keep these around and
+  conveniently re-execute them to check their results as the
+  function in question is worked on?  Perhaps even retaining
+  these saved "calls with their results" afterwards to use for
+  automated testing?
+
+  `niche` is a tool for Janet code to help with this [2].
+
+  Brief Explanation
+  -----------------
+
+  The basic idea is to place appropriate expressions within
+  `comment` forms, apply `niche` to evaluate them, and
+  interpret the results.  A simple example of the type of
+  `comment` form mentioned is:
+
+    (comment
+
+      (function-to-test arg1 arg2)
+      # =>
+      :expected-value
+
+      )
+
+  The content of such `comment` forms is sometimes referred to
+  as "comment-hidden expressions".
+
+  About the Name
+  --------------
+
+  The name `niche` is short for:
+
+    "Nimbly Interpret Comment-Hidden Expressions"
+
+  Goals and Non-goals
+  -------------------
+
+  It is a non-goal of `niche` to be a comprehensive testing
+  tool.  It's more meant to:
+
+  * aid early and exploratory development,
+
+  * provide a way to record testable illustrative examples
+    for future code readers, and
+
+  * be used alongside other testing tools and libraries
+
+  Further Information
+  -------------------
+
+  See the tutorial and/or reference documentation for further
+  details.
+
+  The source code for `niche` (in the `src` directory of the
+  repository) contains tests for `niche` itself using
+  comment-hidden expressions.
+
+  [1] ...or macro or just some expression.
+
+  [2] It's definitely not the first of its kind to provide some
+  support for this idea.  The earliest the author has found for
+  a similar idea goes back to 2008 for the Racket language
+  (`eli-tester`), but it seems unlikely that there were no
+  other attempts.
+
+  Niche is the fifth incarnation in a series of tools for Janet
+  going back to 2020, starting with judge-gen.
+  ``)
+
+(def d/tutorial
+  ``
+  Tutorial
+  ========
+
+  This is a tutorial that introduces basics.  Please see the
+  reference documentation for further details.
+
+  Expressing Tests
+  ----------------
+
+  Create a file named `smile.janet` and put the following
+  content in it:
+
+    (comment
+
+      (+ 1 2)
+      # =>
+      3
+
+      )
+
+  Some things to note:
+
+  1. There is a surrounding `comment` form.
+
+  2. There is an instance of `# =>` that indicates the presence
+     of a test.
+
+  3. The expression above `# =>` is intended to compute an
+     "actual" value.
+
+  4. The expression below `# =>` is intended to compute an
+     "expected" value.
+
+  So to express a test, put an expression to "test" which
+  computes an "actual" value before another expression which is
+  used to arrive at an expected value, and separate them by an
+  instance of `# =>` on a line of its own.
+
+  Some terminology:
+
+  1. `# =>` is sometimes referred to as a "test indicator".
+     It is modeled after sequences of characters sometimes used
+     in various lisp communities to express "what comes before
+     evaluates to what comes after".
+
+  2. Expressions within the `comment` form may sometimes be
+     referred to as "comment-hidden expressions".
+
+  The use of the `comment` form means:
+
+  1. The content doesn't really affect the meaning of existing
+     code in a file according to `janet`.
+
+  2. We can start writing tests without installing `niche`.
+     Expressions can still be evaluated by "sending" them to a
+     REPL, either via editor tooling or by copy-pasting.
+
+  3. Your code doesn't gain any additional library dependencies,
+     whether `niche` is installed or not.
+
+  Using the `niche` tool
+  ----------------------
+
+  Re-evaluating things manually can get old pretty quickly
+  though so obtaining `niche.janet` and putting or symlinking it
+  on your `PATH` is recommended for convenience.
+
+  To run the tests, pass the path of the file with the `comment`
+  form in it to `niche`:
+
+    $ niche.janet smile.janet
+
+  or if you created a symlink to `niche.janet` named `niche`:
+
+    $ niche smile.janet
+
+  Interpreting `niche` output
+  ---------------------------
+
+  If all went well, the following sort of output should appear:
+
+    smile.janet - [1/1]
+    ===================================================
+    All tests successful in 1 file(s).
+    Total processing time was 0.00 secs.
+
+  Try changing the expected value from `3` to `11` in
+  `smile.janet` like:
+
+    (comment
+
+      (+ 1 2)
+      # =>
+      11
+
+      )
+
+  Now run `niche` again:
+
+    $ niche smile.janet
+
+  The output should look something like:
+
+    smile.janet
+    ---------------------------------------------------
+    [1]
+
+    failed:
+    line 4
+
+    form:
+    (+ 1 2)
+
+    expected:
+    11
+
+    actual:
+    3
+    ---------------------------------------------------
+    [0/1]
+    ===================================================
+    Test failures in 1 of 1 file(s).
+    Total processing time was 0.00 secs.
+
+  It may be obvious but to spell things out a bit:
+
+  * The "smile.janet" at the top indicates which file the
+    immediately following information refers to.
+
+  * There are two "dashed" separators (made up of the `-`
+    character) that "bound" the failure results for
+    "smile.janet".
+
+  * The "[1]" indicates that what follows immediately is the
+    first faliure in the file.
+
+  * The "line 4" portion under "failed:" refers to where the
+    test indicator (`# =>`) is in the file.  This can be useful
+    information when navigating to the relevant code in the
+    source file.
+
+  * The "form:" portion labels what expression was evaluated to
+    arrive at the actual value computed.
+
+  * The "expected:" portion labels what value was expected.
+
+  * The "actual:" portion labels what value was actually
+    computed.
+
+  * The "[0/1]" indicates that no tests passed out of a total of
+    one test detected for the file.
+
+  * The portions below the separator made up of `=` characters
+    summarize the number of failures detected, the total number
+    of associated files with failures, and the total processing
+    time.
+
+  There are some more details that were not covered such as:
+
+  * Multiple test expressions can live in a single `comment`
+    form.
+
+  * Each `comment` can also contain non-test expressions.
+
+  * A `comment` form that has no tests is ignored by `niche`.
+
+  These and other details are covered in the reference
+  documentation.
+  ``)
+
+(def d/reference
+  ``
+  Reference
+  =========
+
+  Anatomy of a Test
+  -----------------
+
+  Tests lives inside `comment` forms.  A simple example is:
+
+    (comment
+
+      (+ 1 2)
+      # =>
+      3
+
+      )
+
+  A general description might be:
+
+    (comment
+
+      <actual-value-expression>
+      <test-indicator>
+      <expected-value-expression>
+
+      )
+
+  `<actual-value-expression>` is used to compute an "actual"
+  value.  The expression may span multiple lines.
+
+  The result value is compared using `deep=` with the result
+  of computing `<expected-value-expression>` (which may also
+  span multiple lines).
+
+  `<test-indicator>` is the sequence of characters `# =>`.
+  (Some other sequences may work, but only `# =>` is intended
+  for general consumption at the moment.)
+
+  Each test indicator should live on a line of its own.  The
+  line number that a test indicator is on is used to report
+  failing tests.
+
+  Some More Details
+  -----------------
+
+  * Multiple tests may appear within a single `comment` form.
+    They are evaluated in order.
+
+  * Forms that are not part of any test may also occur within
+    `comment` forms.  These will also be evaluated in order
+    but only if the containing `comment` form has at least one
+    test in it.  This is done so that "ordinary" `comment`
+    forms that existed prior to `niche`'s existence are not
+    accidentally executed.
+
+  * The expressions within `comment` forms that have tests in
+    them are executed in order, interleaved with other
+    non-comment expressions in the file.  There is no
+    isolation between `comment` forms for the sake of
+    simplicity.
+
+  * Evaluation of expressions within `comment` forms with tests
+    occur as if they were at the top-level.  That is, it is
+    as if the wrapping of `(comment ...)` is removed and only
+    `...` remains for evaluation.
+
+  Limits on Expected Value Expressions
+  ------------------------------------
+
+  * Since expected value expressions get evaluated, if one
+    wishes to express a tuple value, it is recommended to use
+    either square bracket tuples or to quote paren tuples.
+    Using just paren tuples will likely yield an inappropriate
+    result because the expression will be treated as a call.
+
+  * Only expressions that produce "readable" values are
+    supported for actual value and expected value expressions.
+    So expressions that produce non-readable values such as
+    `printf` (which would yield `<cfunction printf>`) may
+    appear to work sometimes, but not in all cases.
+
+  * Since `deep=` is used to compare values, be careful when
+    trying to compare dictionaries that have prototype values.
+    The prototype information is not typically exposed as part
+    of a dictionary's printed representation.  If desired,
+    check prototype information using suitable expressions.
+
+  Disabling Tests
+  ---------------
+
+  * Putting a space character between the `=` and `>` of a
+    test indicator will disable the corresponding test.
+    However, the associated actual and expected value
+    expressions will still be evaluated.
+
+  * Putting a space between the `(` and `c` characters for a
+    `(comment ...)` form will prevent any of the expressions
+    within the `comment` form from being executed.
+  ``)
+
+(defn d/choose-doc
+  [doc-type]
+  (get {:usage d/usage
+        :reference d/reference
+        :tutorial d/tutorial
+        :background d/background}
+       doc-type d/usage))
+
+
+(comment import ./errors :prefix "")
+
+(comment import ./files :prefix "")
+
+(comment import ./log :prefix "")
+
+(comment import ./output :prefix "")
+
+
+(def version "2026-03-30_01-35-59")
+
+(defn main
+  [& args]
+  (def start-time (os/clock))
+  #
+  (def opts (a/parse-args (drop 1 args)))
+  #
+  (when-let [htype (get opts :show-help)
+             doc-str (d/choose-doc htype)]
+    (l/noten :o doc-str)
+    (os/exit 0))
+  #
+  (when (get opts :show-version)
+    (l/noten :o version)
+    (os/exit 0))
+  #
+  (when (not (get opts :includes))
+    (l/noten :e "Nothing to operate on.")
+    (os/exit 1))
+  #
+  (def src-paths
+    (f/collect-paths (get opts :includes)
+                     |(or (string/has-suffix? ".janet" $)
+                          (f/has-janet-shebang? $))))
+  (when (get opts :raw)
+    (l/clear-d-tables!))
+  # 0 - successful testing
+  # 1 - at least one test failure
+  # 2 - caught error
+  (def [exit-code test-results]
+    (try
+      (c/make-run-report src-paths opts)
+      ([e f]
+        (l/noten :e)
+        (if (dictionary? e)
+          (e/show e)
+          (debug/stacktrace f e "internal "))
+        (l/noten :e "Processing halted.")
+        [2 @[]])))
+  #
+  (if (get opts :raw)
+    (print (o/color-form test-results))
+    (l/notenf :i "Total processing time was %.02f secs."
+              (- (os/clock) start-time)))
+  #
+  (when (not (get opts :no-exit))
+    (os/exit exit-code)))
+

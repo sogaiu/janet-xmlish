@@ -1,0 +1,5 @@
+{# describes what to test - file and dir paths
+ :includes ["janet-xmlish" "usages"]
+ # describes what to skip - file paths only
+ :excludes []
+}

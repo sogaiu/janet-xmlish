@@ -1,9 +1,34 @@
+(defn- handle-empty-elt
+  [& args]
+  (def name (first args))
+  (def attrs (drop 1 args))
+  #
+  {:attrs (when (not= (length attrs) 0)
+            (table ;attrs))
+   :tag name})
+
+(defn- handle-non-empty-elt
+  [& args]
+  (def open-name (first (first args)))
+  (def close-name (last args))
+  (when (= open-name close-name)
+    (def name open-name)
+    (def attrs (drop 1 (first args)))
+    (def content (filter |(not= "" $)
+                         (tuple/slice args 1 -2)))
+    #
+    {:attrs (when (not= (length attrs) 0)
+              (table ;attrs))
+     :content (when (not= (length content) 0)
+                content)
+     :tag name}))
+
 # https://www.w3.org/TR/xml
 (def xmlish-peg
   ~@{:main (sequence (opt (drop :xml-declaration)) :ws*
                      (opt (drop :doctype)) :ws*
                      (any :comment) :ws*
-                     :element :ws*
+                     :elt :ws*
                      (any :comment) :ws*)
      # XXX: see spec for whitespace details
      :xml-declaration (sequence :ws* "<?xml" :ws*
@@ -43,46 +68,21 @@
                        (sequence "-" (if-not (set "-") 1))))
                 "-->")
      #
-     :element (choice :empty-element :non-empty-element)
+     :elt (choice :empty-elt :non-empty-elt)
      #
-     :empty-element (cmt (sequence
-                           "<" (capture :name) :ws*
-                           (any :attribute)
-                           "/>")
-                         ,|(let [args $&
-                                 elt-name (first args)
-                                 attrs_ (drop 1 args)
-                                 attrs (if (= (length attrs_) 0)
-                                         nil
-                                         (table ;attrs_))]
-                             {:attrs attrs
-                              :tag elt-name}))
+     :empty-elt (cmt (sequence
+                       "<" (capture :name) :ws*
+                       (any :attribute)
+                       "/>")
+                     ,handle-empty-elt)
      #
-     :non-empty-element
-     (cmt (sequence :open-tag
-                    (any (choice (capture :pcdata)
-                                 :comment
-                                 :element
-                                 (capture :content)))
-                    :close-tag)
-          ,|(let [args $&
-                  open-name (first (first args))
-                  attrs_ (drop 1 (first args))
-                  close-name (last args)]
-              (when (= open-name close-name)
-                (let [elt-name open-name
-                      content_ (filter (fn [c-item]
-                                         (not= "" c-item))
-                                       (tuple/slice args 1 -2))
-                      content (if (= (length content_) 0)
-                                nil
-                                content_)
-                      attrs (if (= (length attrs_) 0)
-                              nil
-                              (table ;attrs_))]
-                  {:attrs attrs
-                   :content content
-                   :tag elt-name}))))
+     :non-empty-elt (cmt (sequence :open-tag
+                                   (any (choice (capture :pcdata)
+                                                :comment
+                                                :elt
+                                                (capture :content)))
+                                   :close-tag)
+                         ,handle-non-empty-elt)
      # XXX: this is a hack, see section 2.3 of xml spec
      :name (sequence (not "!") (not "?") (to (set " /<>")))
      #
@@ -117,9 +117,7 @@
                 "\n"]
      :tag "some"}]
 
-  # pushing the bounds of reasonableness for expressing this way?
-  (peg/match
-    xmlish-peg
+  (def rss-feed
     (string
       `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>` "\n"
       `<rss version="2.0">` "\n"
@@ -139,6 +137,9 @@
       `  </item>` "\n"
       `</channel>` "\n"
       `</rss>`))
+
+  # pushing the bounds of reasonableness for expressing this way?
+  (peg/match xmlish-peg rss-feed)
   # =>
   @[{:content
      @["\n"

@@ -125,7 +125,7 @@
       `<title>RSS Title</title>` "\n"
       `<description>This is an example of an RSS feed</description>` "\n"
       `<link>http://www.example.com/main.html</link>` "\n"
-      `<lastBuildDate>Mon, 06 Sep 2010 00:01:00 +0000 </lastBuildDate>` "\n"
+      `<lastBuildDate>Mon, 06 Sep 2010 00:01:00 +0000</lastBuildDate>` "\n"
       `<pubDate>Sun, 06 Sep 2009 16:20:00 +0000</pubDate>` "\n"
       `<ttl>1800</ttl>` "\n"
       `<item>` "\n"
@@ -154,7 +154,7 @@
           {:content @["http://www.example.com/main.html"]
            :tag "link"}
           "\n"
-          {:content @["Mon, 06 Sep 2010 00:01:00 +0000 "]
+          {:content @["Mon, 06 Sep 2010 00:01:00 +0000"]
            :tag "lastBuildDate"}
           "\n"
           {:content @["Sun, 06 Sep 2009 16:20:00 +0000"]
@@ -238,7 +238,7 @@
            :tag "description"}
           {:content @["http://www.example.com/main.html"]
            :tag "link"}
-          {:content @["Mon, 06 Sep 2010 00:01:00 +0000 "]
+          {:content @["Mon, 06 Sep 2010 00:01:00 +0000"]
            :tag "lastBuildDate"}
           {:content @["Sun, 06 Sep 2009 16:20:00 +0000"]
            :tag "pubDate"}

@@ -30,25 +30,25 @@
     :pubid-char-wo-quote (choice :w (set ` \r\n-()+,./:=?;!*#@$_%`))
     # XXX: not accurate, see section 3.1 of xml spec
     :attribute (sequence
-                (capture (to (set " /<=>\""))) :ws*
-                "=" :ws*
-                (choice (sequence `"` (capture (to `"`)) `"`)
-                        (sequence "'" (capture (to "'")) "'"))
-                :ws*)
+                 (capture (to (set " /<=>\""))) :ws*
+                 "=" :ws*
+                 (choice (sequence `"` (capture (to `"`)) `"`)
+                         (sequence "'" (capture (to "'")) "'"))
+                 :ws*)
     # section 2.5 of xml spec
     :comment (sequence
-              "<!--"
-              (any (choice
-                    (if-not (set "-") 1)
-                    (sequence "-" (if-not (set "-") 1))))
-              "-->")
+               "<!--"
+               (any (choice
+                      (if-not (set "-") 1)
+                      (sequence "-" (if-not (set "-") 1))))
+               "-->")
     #
     :element (choice :empty-element :non-empty-element)
     #
     :empty-element (cmt (sequence
-                         "<" (capture :name) :ws*
-                         (any :attribute)
-                         "/>")
+                          "<" (capture :name) :ws*
+                          (any :attribute)
+                          "/>")
                         ,|(let [args $&
                                 elt-name (first args)
                                 attrs_ (drop 1 args)
@@ -72,8 +72,8 @@
              (when (= open-name close-name)
                (let [elt-name open-name
                      content_ (filter (fn [c-item]
-                                       (not= "" c-item))
-                                     (tuple/slice args 1 -2))
+                                        (not= "" c-item))
+                                      (tuple/slice args 1 -2))
                      content (if (= (length content_) 0)
                                nil
                                content_)

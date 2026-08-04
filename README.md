@@ -55,6 +55,12 @@ Evaluation might yield:
 
 See `(comment ...)` portions of source files and files in `usages` for examples.
 
+## Extras
+
+No guarantee of maintenance, but `scripts/parse-dir.janet` is a simple
+script showing use of `janet-xmlish` to check if files in a directory
+parse.  The script should be usable on *nix systems.
+
 ## Credits
 
 * snickerbockers - issues and samples

@@ -1,103 +1,103 @@
 # https://www.w3.org/TR/xml
 (def xmlish-peg
-  ~{:main (sequence (opt (drop :xml-declaration)) :ws*
-                    (opt (drop :doctype)) :ws*
-                    (any :comment) :ws*
-                    :element :ws*
-                    (any :comment) :ws*)
-    # XXX: see spec for whitespace details
-    :xml-declaration (sequence :ws* "<?xml" :ws*
-                               (any :attribute) :ws*
-                               "?>")
-    # section 2.3 of xml spec
-    :ws (set " \t\r\n")
-    :ws+ (some :ws)
-    :ws* (any :ws)
-    # XXX: does not handle internal subset, see section 2.8 of xml spec
-    :doctype (sequence :ws* "<!" (choice "DOCTYPE" "doctype") :ws+
-                       :name (opt (sequence :ws+ :external-id)) :ws*
-                       ">")
-    # section 4.2.2 of xml spec
-    :external-id
-    (choice (sequence "SYSTEM" :ws+ :system-literal)
-            (sequence "PUBLIC" :ws+ :pubid-literal :ws+ :system-literal))
-    # section 2.3 of xml spec
-    :system-literal (choice (sequence `"` (capture (to `"`)) `"`)
-                            (sequence "'" (capture (to "'")) "'"))
-    :pubid-literal (choice (sequence `"` (any :pubid-char) `"`)
-                           (sequence "'" (any :pubid-char-wo-quote) "'"))
-    :pubid-char (choice :pubid-char-wo-quote "'")
-    :pubid-char-wo-quote (choice :w (set ` \r\n-()+,./:=?;!*#@$_%`))
-    # XXX: not accurate, see section 3.1 of xml spec
-    :attribute (sequence
-                 (capture (to (set " /<=>\""))) :ws*
-                 "=" :ws*
-                 (choice (sequence `"` (capture (to `"`)) `"`)
-                         (sequence "'" (capture (to "'")) "'"))
-                 :ws*)
-    # section 2.5 of xml spec
-    :comment (sequence
-               "<!--"
-               (any (choice
-                      (if-not (set "-") 1)
-                      (sequence "-" (if-not (set "-") 1))))
-               "-->")
-    #
-    :element (choice :empty-element :non-empty-element)
-    #
-    :empty-element (cmt (sequence
-                          "<" (capture :name) :ws*
-                          (any :attribute)
-                          "/>")
-                        ,|(let [args $&
-                                elt-name (first args)
-                                attrs_ (drop 1 args)
-                                attrs (if (= (length attrs_) 0)
-                                        nil
-                                        (table ;attrs_))]
-                            {:attrs attrs
-                             :tag elt-name}))
-    #
-    :non-empty-element
-    (cmt (sequence :open-tag
-                   (any (choice (capture :pcdata)
-                                :comment
-                                :element
-                                (capture :content)))
-                   :close-tag)
-         ,|(let [args $&
-                 open-name (first (first args))
-                 attrs_ (drop 1 (first args))
-                 close-name (last args)]
-             (when (= open-name close-name)
-               (let [elt-name open-name
-                     content_ (filter (fn [c-item]
-                                        (not= "" c-item))
-                                      (tuple/slice args 1 -2))
-                     content (if (= (length content_) 0)
-                               nil
-                               content_)
-                     attrs (if (= (length attrs_) 0)
-                             nil
-                             (table ;attrs_))]
-                 {:attrs attrs
-                  :content content
-                  :tag elt-name}))))
-    # XXX: this is a hack, see section 2.3 of xml spec
-    :name (sequence (not "!") (not "?") (to (set " /<>")))
-    #
-    :open-tag (group
-                (sequence
-                  "<" (capture :name) :ws*
-                  (any :attribute)
-                  ">"))
-    #
-    :close-tag (sequence
-                 "</" (capture :name) :ws* ">")
-    # XXX: may not be accurate
-    :pcdata (sequence "<![CDATA[" (to "]]>") "]]>")
-    # XXX: may not be accurate
-    :content (to "<")})
+  ~@{:main (sequence (opt (drop :xml-declaration)) :ws*
+                     (opt (drop :doctype)) :ws*
+                     (any :comment) :ws*
+                     :element :ws*
+                     (any :comment) :ws*)
+     # XXX: see spec for whitespace details
+     :xml-declaration (sequence :ws* "<?xml" :ws*
+                                (any :attribute) :ws*
+                                "?>")
+     # section 2.3 of xml spec
+     :ws (set " \t\r\n")
+     :ws+ (some :ws)
+     :ws* (any :ws)
+     # XXX: does not handle internal subset, see section 2.8 of xml spec
+     :doctype (sequence :ws* "<!" (choice "DOCTYPE" "doctype") :ws+
+                        :name (opt (sequence :ws+ :external-id)) :ws*
+                        ">")
+     # section 4.2.2 of xml spec
+     :external-id
+     (choice (sequence "SYSTEM" :ws+ :system-literal)
+             (sequence "PUBLIC" :ws+ :pubid-literal :ws+ :system-literal))
+     # section 2.3 of xml spec
+     :system-literal (choice (sequence `"` (capture (to `"`)) `"`)
+                             (sequence "'" (capture (to "'")) "'"))
+     :pubid-literal (choice (sequence `"` (any :pubid-char) `"`)
+                            (sequence "'" (any :pubid-char-wo-quote) "'"))
+     :pubid-char (choice :pubid-char-wo-quote "'")
+     :pubid-char-wo-quote (choice :w (set ` \r\n-()+,./:=?;!*#@$_%`))
+     # XXX: not accurate, see section 3.1 of xml spec
+     :attribute (sequence
+                  (capture (to (set " /<=>\""))) :ws*
+                  "=" :ws*
+                  (choice (sequence `"` (capture (to `"`)) `"`)
+                          (sequence "'" (capture (to "'")) "'"))
+                  :ws*)
+     # section 2.5 of xml spec
+     :comment (sequence
+                "<!--"
+                (any (choice
+                       (if-not (set "-") 1)
+                       (sequence "-" (if-not (set "-") 1))))
+                "-->")
+     #
+     :element (choice :empty-element :non-empty-element)
+     #
+     :empty-element (cmt (sequence
+                           "<" (capture :name) :ws*
+                           (any :attribute)
+                           "/>")
+                         ,|(let [args $&
+                                 elt-name (first args)
+                                 attrs_ (drop 1 args)
+                                 attrs (if (= (length attrs_) 0)
+                                         nil
+                                         (table ;attrs_))]
+                             {:attrs attrs
+                              :tag elt-name}))
+     #
+     :non-empty-element
+     (cmt (sequence :open-tag
+                    (any (choice (capture :pcdata)
+                                 :comment
+                                 :element
+                                 (capture :content)))
+                    :close-tag)
+          ,|(let [args $&
+                  open-name (first (first args))
+                  attrs_ (drop 1 (first args))
+                  close-name (last args)]
+              (when (= open-name close-name)
+                (let [elt-name open-name
+                      content_ (filter (fn [c-item]
+                                         (not= "" c-item))
+                                       (tuple/slice args 1 -2))
+                      content (if (= (length content_) 0)
+                                nil
+                                content_)
+                      attrs (if (= (length attrs_) 0)
+                              nil
+                              (table ;attrs_))]
+                  {:attrs attrs
+                   :content content
+                   :tag elt-name}))))
+     # XXX: this is a hack, see section 2.3 of xml spec
+     :name (sequence (not "!") (not "?") (to (set " /<>")))
+     #
+     :open-tag (group
+                 (sequence
+                   "<" (capture :name) :ws*
+                   (any :attribute)
+                   ">"))
+     #
+     :close-tag (sequence
+                  "</" (capture :name) :ws* ">")
+     # XXX: may not be accurate
+     :pcdata (sequence "<![CDATA[" (to "]]>") "]]>")
+     # XXX: may not be accurate
+     :content (to "<")})
 
 (comment
 

@@ -23,7 +23,7 @@ janet -l ./janet-xmlish/grammar -e '(pp (peg/match xmlish-peg "<h1>hi</h1>"))'
 
 Output:
 
-```
+```janet
 @[{:content @["hi"] :tag "h1"}]
 ```
 
@@ -37,7 +37,7 @@ jpm install https://github.com/sogaiu/janet-xmlish
 
 Code might look like:
 
-```
+```janet
 (import janet-xmlish/grammar :as xmlish)
 
 (peg/match xmlish/xmlish-peg
@@ -45,7 +45,8 @@ Code might look like:
 ```
 
 Evaluation might yield:
-```
+
+```janet
 @[{:attrs @{"href" "http://127.0.0.1:8000"}
    :content @["link"]
    :tag "a"}]

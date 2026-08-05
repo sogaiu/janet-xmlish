@@ -1,4 +1,4 @@
-(import ../janet-xmlish/grammar :prefix "")
+(import ../janet-xmlish/grammar-no-ws :prefix "")
 
 (comment
 
@@ -25,7 +25,7 @@
     </datafile>
     ``)
 
-  (peg/match xmlish-no-ws-peg tosec-luxor-abc-806)
+  (peg/match xmlish-peg tosec-luxor-abc-806)
   # =>
   @[{:content
      @[{:content
